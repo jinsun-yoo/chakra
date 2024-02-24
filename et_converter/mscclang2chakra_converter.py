@@ -21,7 +21,9 @@ from chakra.et_def.et_def_pb2 import (
 )
 
 HARDCODE_COMM_SIZE = int(1024 * 1024 / 4)
-HARDCODE_COMP_TIME_MS = 3 * int(HARDCODE_COMM_SIZE / 50)
+HARDCODE_LOCAL_BW = 50
+# 1000 b/c microsecond to nanosecond. Refer to Workload::issue_replay
+HARDCODE_COMP_TIME_NS = int (3 * int(HARDCODE_COMM_SIZE / HARDCODE_LOCAL_BW) / 1000)
 
 class Layer:
     def __init__(
@@ -104,7 +106,7 @@ class MSCCL2ChakraConverter:
         tb_id = tb_xml_node.attrib['id']
         node = self.get_node(f"COMP_NODE_gpu{gpu_id}_tb{tb_id}",
                              COMP_NODE)
-        node.duration_micros = HARDCODE_COMP_TIME_MS
+        node.duration_micros = HARDCODE_COMP_TIME_NS
         return node
 
     def get_send_node (
