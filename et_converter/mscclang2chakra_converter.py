@@ -20,8 +20,8 @@ from chakra.et_def.et_def_pb2 import (
     GlobalMetadata
 )
 
-HARDCODE_COMM_SIZE = 1024 * 1024
-HARDCODE_COMP_TIME_MS = int(3 * (HARDCODE_COMM_SIZE / 50))
+HARDCODE_COMM_SIZE = int(1024 * 1024 / 4)
+HARDCODE_COMP_TIME_MS = 3 * int(HARDCODE_COMM_SIZE / 50)
 
 class Layer:
     def __init__(
