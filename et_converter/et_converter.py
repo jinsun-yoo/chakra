@@ -8,6 +8,7 @@ import traceback
 from logging import FileHandler
 from .text2chakra_converter import Text2ChakraConverter
 from .pytorch2chakra_converter import PyTorch2ChakraConverter
+from .mscclang2chakra_converter import MSCCL2ChakraConverter
 
 def get_logger(log_filename: str) -> logging.Logger:
     formatter = logging.Formatter(
@@ -93,6 +94,12 @@ def main() -> None:
                 args.input_filename,
                 args.output_filename,
                 args.num_dims,
+                logger)
+            converter.convert()
+        elif args.input_type == "msccl":
+            converter = MSCCL2ChakraConverter(
+                args.input_filename, 
+                args.output_filename, 
                 logger)
             converter.convert()
         else:
