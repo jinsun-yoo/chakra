@@ -20,7 +20,7 @@ from chakra.et_def.et_def_pb2 import (
     GlobalMetadata
 )
 
-HARDCODE_COMM_SIZE = int(1024 * 1024 / 4)
+HARDCODE_COMM_SIZE = int(1024 * 1024) # B
 HARDCODE_LOCAL_BW = 50
 # 1000 b/c microsecond to nanosecond. Refer to Workload::issue_replay
 HARDCODE_COMP_TIME_NS = int (3 * int(HARDCODE_COMM_SIZE / HARDCODE_LOCAL_BW) / 1000)
@@ -165,7 +165,7 @@ class MSCCL2ChakraConverter:
 # diff ctrl dep, data dep
         
     def convert(self) -> None:
-        tree = ElementTree.parse('./et_converter/allreduce_ring_4_old_format.xml')
+        tree = ElementTree.parse('./et_converter/allgather_ring_4_old_format.xml')
         root = tree.getroot()
         for gpu in root.findall('gpu'):
             gpu_id = gpu.attrib['id']
@@ -178,6 +178,7 @@ class MSCCL2ChakraConverter:
                     encode_message(g, global_metadata)
                     prev_node = Node()
                     for step in tb.findall('step'):
+                        print(step.attrib)
                         if step.attrib['type'] == "s":
                             print('s')
                             node = self.get_send_node(gpu_id, tb)
