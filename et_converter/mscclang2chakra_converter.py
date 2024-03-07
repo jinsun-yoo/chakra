@@ -20,7 +20,7 @@ from chakra.et_def.et_def_pb2 import (
     GlobalMetadata
 )
 
-HARDCODE_COMM_SIZE = int(1024 * 1024) # B
+HARDCODE_COMM_SIZE = int(1024 * 1024) # B / 4
 HARDCODE_LOCAL_BW = 50
 # 1000 b/c microsecond to nanosecond. Refer to Workload::issue_replay
 HARDCODE_COMP_TIME_NS = int (3 * int(HARDCODE_COMM_SIZE / HARDCODE_LOCAL_BW) / 1000)
