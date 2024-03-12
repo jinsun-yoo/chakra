@@ -162,41 +162,96 @@ class MSCCL2ChakraConverter:
         parent_node: Any
     ) -> None:
         child_node.data_deps.append(parent_node.id)
+        # print(f'add parent {parent_node.id} to {child_node.id}, {child_node.data_deps}')
+
 # diff ctrl dep, data dep
         
     def convert(self) -> None:
-        tree = ElementTree.parse('./et_converter/allgather_ring_4_old_format.xml')
+        node_map = {}
+        step_map = {}
+        tree = ElementTree.parse('./et_converter/allreduce_hierarchical_old_format.xml')
         root = tree.getroot()
         for gpu in root.findall('gpu'):
-            gpu_id = gpu.attrib['id']
+            gpu_id = int(gpu.attrib['id'])
+            node_map[gpu_id] = {}
+            step_map[gpu_id] = {}
+            self.reset_node_id()
             for tb in gpu.findall('tb'):
-                tb_id = tb.attrib['id']
-                output_filename = "%s.%s.et" % (self.output_filename, gpu_id)
-                with open(output_filename, "wb") as g:
-                    self.reset_node_id()
-                    global_metadata = self.get_global_metadata()
-                    encode_message(g, global_metadata)
+                tb_id = int(tb.attrib['id'])
+                node_map[gpu_id][tb_id] = {}
+                step_map[gpu_id][tb_id] = {}
+                for step in tb.findall('step'):
+                    step_id = int(step.attrib['s'])
+                    step_map[gpu_id][tb_id][step_id] = step
+                    if step.attrib['type'] == "s":
+                        # print('s')
+                        node = self.get_send_node(gpu_id, tb)
+                        node_map[gpu_id][tb_id][step_id] = node
+                    elif step.attrib['type'] == "r":
+                        # print('r')
+                        node = self.get_recv_node(gpu_id, tb)
+                        node_map[gpu_id][tb_id][step_id] = node
+                    elif step.attrib['type'] == "rrc":
+                        # print('rrc')
+                        node = self.get_recv_node(gpu_id, tb)
+                        node_map[gpu_id][tb_id][step_id] = [node]
+                        node = self.get_comp_node(gpu_id, tb)
+                        node_map[gpu_id][tb_id][step_id].append(node)
+
+        for gpu_id in node_map:
+            output_filename = "%s.%s.et" % (self.output_filename, gpu_id)
+            with open(output_filename, "wb") as g:
+                global_metadata = self.get_global_metadata()
+                encode_message(g, global_metadata)
+                for tb_id in node_map[gpu_id]:
                     prev_node = Node()
-                    for step in tb.findall('step'):
-                        print(step.attrib)
-                        if step.attrib['type'] == "s":
-                            print('s')
-                            node = self.get_send_node(gpu_id, tb)
-                        elif step.attrib['type'] == "r":
-                            print('r')
-                            node = self.get_recv_node(gpu_id, tb)
-                        elif step.attrib['type'] == "rrc":
-                            print('rrc')
-                            node = self.get_recv_node(gpu_id, tb)
-                            if node.id != 0:
-                                self.add_parent(node, prev_node)
-                                print(f'add {prev_node.id} as parent to {node.id}')
-                            prev_node = node 
-                            encode_message(g, node)
-                            node = self.get_comp_node(gpu_id, tb)
-                        if node.id != 0:
-                            self.add_parent(node, prev_node)
-                            print(f'add {prev_node.id} as parent to {node.id}')
-                        prev_node = node
-                        encode_message(g, node)
-        
+                    for step_id, et_node in node_map[gpu_id][tb_id].items():
+                        # if gpu_id == 0:
+                        #     print(et_node)
+                        if type(et_node) is list:
+                            # RRC
+                            recv_node = et_node[0]
+                            comp_node = et_node[1]
+                            if step_id != 0:
+                                self.add_parent(recv_node, prev_node)
+                            self.add_parent(comp_node, recv_node)
+
+                            # Parent by data dep
+                            step = step_map[gpu_id][tb_id][step_id]
+                            dep_tb_id = int(step.attrib['depid'])
+                            dep_step_id = int(step.attrib['deps'])
+
+                            if dep_tb_id != -1:
+                                dep_node = node_map[gpu_id][dep_tb_id][dep_step_id]
+                                if type(dep_node) is list:
+                                    self.add_parent(recv_node, dep_node[1])
+                                else:
+                                    self.add_parent(recv_node, dep_node)
+                            encode_message(g, recv_node)
+                            encode_message(g, comp_node)
+                            if gpu_id == 0:
+                                print('encode node', recv_node)
+                                print('encode node', comp_node)
+                            prev_node = comp_node
+                            continue
+
+                        # Parent by control
+                        if step_id != 0:
+                            self.add_parent(et_node, prev_node)
+                        # Parent by data dep
+                        step = step_map[gpu_id][tb_id][step_id]
+                        dep_tb_id = int(step.attrib['depid'])
+                        dep_step_id = int(step.attrib['deps'])
+                        if dep_tb_id != -1:
+                            dep_node = node_map[gpu_id][dep_tb_id][dep_step_id]
+                            if type(dep_node) is list:
+                                self.add_parent(et_node, dep_node[1])
+                            else:
+                                self.add_parent(et_node, dep_node)
+                            # if gpu_id == 0:
+                            #     print(f'add parent {gpu_id}-{dep_tb_id}-{dep_step_id} to {gpu_id}-{tb_id}-{step_id}')
+                        encode_message(g, et_node)
+                        if gpu_id == 0:
+                            print('encode node', et_node)
+                        prev_node = et_node
+
