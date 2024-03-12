@@ -20,7 +20,7 @@ from chakra.et_def.et_def_pb2 import (
     GlobalMetadata
 )
 
-HARDCODE_COMM_SIZE = int(1024 * 1024) # B / 4
+HARDCODE_COMM_SIZE = int(1024 * 1024 / 8) # B / 4
 HARDCODE_LOCAL_BW = 50
 # 1000 b/c microsecond to nanosecond. Refer to Workload::issue_replay
 HARDCODE_COMP_TIME_NS = int (3 * int(HARDCODE_COMM_SIZE / HARDCODE_LOCAL_BW) / 1000)
@@ -100,23 +100,22 @@ class MSCCL2ChakraConverter:
 
     def get_comp_node(
         self,
-        gpu_id: int,
-        tb_xml_node: ElementTree.Element
+        tb_xml_node: ElementTree.Element,
+        step_id: int
     ) -> Any:
         tb_id = tb_xml_node.attrib['id']
-        node = self.get_node(f"COMP_NODE_gpu{gpu_id}_tb{tb_id}",
+        node = self.get_node(f"COMP_NODE_tb{tb_id}_step{step_id}",
                              COMP_NODE)
         node.duration_micros = HARDCODE_COMP_TIME_NS
         return node
 
     def get_send_node (
         self, 
-        gpu_id: int,
-        tb_xml_node: ElementTree.Element
+        tb_xml_node: ElementTree.Element,
+        step_id: int
     ) -> Any:
         tb_id = tb_xml_node.attrib['id']
-        layer_name = f'COMM_SEND_NODE_gpu{gpu_id}_tb{tb_id}'
-        src = gpu_id
+        layer_name = f'COMM_SEND_NODE_tb{tb_id}_step{step_id}'
         dst = int(tb_xml_node.attrib['send'])
         tag = int(tb_xml_node.attrib['chan'])
         size = HARDCODE_COMM_SIZE
@@ -135,13 +134,12 @@ class MSCCL2ChakraConverter:
 
     def get_recv_node (
         self, 
-        gpu_id: int,
-        tb_xml_node: ElementTree.Element
+        tb_xml_node: ElementTree.Element,
+        step_id: int
     ) -> Any:
         tb_id = tb_xml_node.attrib['id']
-        layer_name = f'COMM_RECV_NODE_gpu{gpu_id}_tb{tb_id}'
+        layer_name = f'COMM_RECV_NODE_tb{tb_id}_step{step_id}'
         src = int(tb_xml_node.attrib['recv'])
-        dst = gpu_id
         tag = int(tb_xml_node.attrib['chan'])
         size = HARDCODE_COMM_SIZE
 
@@ -185,17 +183,17 @@ class MSCCL2ChakraConverter:
                     step_map[gpu_id][tb_id][step_id] = step
                     if step.attrib['type'] == "s":
                         # print('s')
-                        node = self.get_send_node(gpu_id, tb)
+                        node = self.get_send_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id] = node
                     elif step.attrib['type'] == "r":
                         # print('r')
-                        node = self.get_recv_node(gpu_id, tb)
+                        node = self.get_recv_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id] = node
                     elif step.attrib['type'] == "rrc":
                         # print('rrc')
-                        node = self.get_recv_node(gpu_id, tb)
+                        node = self.get_recv_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id] = [node]
-                        node = self.get_comp_node(gpu_id, tb)
+                        node = self.get_comp_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id].append(node)
 
         for gpu_id in node_map:
