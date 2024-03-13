@@ -167,7 +167,7 @@ class MSCCL2ChakraConverter:
     def convert(self) -> None:
         node_map = {}
         step_map = {}
-        tree = ElementTree.parse('./et_converter/allreduce_hierarchical_old_format.xml')
+        tree = ElementTree.parse(self.input_filename)
         root = tree.getroot()
         for gpu in root.findall('gpu'):
             gpu_id = int(gpu.attrib['id'])
