@@ -20,43 +20,10 @@ from chakra.et_def.et_def_pb2 import (
     GlobalMetadata
 )
 
-HARDCODE_COMM_SIZE = int(1024 * 1024 / 8) # B / 4
+HARDCODE_COMM_SIZE = int(1024 * 1024 / 4) # Bytes
 HARDCODE_LOCAL_BW = 50
 # 1000 b/c microsecond to nanosecond. Refer to Workload::issue_replay
 HARDCODE_COMP_TIME_NS = int (3 * int(HARDCODE_COMM_SIZE / HARDCODE_LOCAL_BW) / 1000)
-
-class Layer:
-    def __init__(
-        self,
-        line: str
-    ) -> None:
-        try:
-            col = line.strip().split()
-            self.name = col[0]
-
-            # forward
-            self.fwd_comp_time = int(col[2])
-            self.fwd_comm_type = str(col[3])
-            self.fwd_comm_size = int(col[4])
-            self.fwd_comp_node = None
-            self.fwd_comm_node = None
-
-            # backward input gradient
-            self.bwd_ig_comp_time = int(col[5])
-            self.bwd_ig_comm_type = str(col[6])
-            self.bwd_ig_comm_size = int(col[7])
-            self.bwd_ig_comp_node = None
-            self.bwd_ig_comm_node = None
-
-            # backward weight gradient
-            self.bwd_wg_comp_time = int(col[8])
-            self.bwd_wg_comm_type = str(col[9])
-            self.bwd_wg_comm_size = int(col[10])
-            self.bwd_wg_update_time = str(col[11])
-            self.bwd_wg_comp_node = None
-            self.bwd_wg_comm_node = None
-        except Exception:
-            raise ValueError(f"Cannot parse the following layer -- \"{line}\"")
 
 class MSCCL2ChakraConverter:
     def __init__(
@@ -70,7 +37,8 @@ class MSCCL2ChakraConverter:
         self.logger = logger
         self.next_node_id = 0
 
-    def get_global_metadata(self):
+    # Creates the global metadata info that is added to the start of all ET files.
+    def create_global_metadata(self):
         input_text = ""
         with open(self.input_filename, "r") as input_file:
             input_text = input_file.read()
@@ -81,8 +49,9 @@ class MSCCL2ChakraConverter:
         metadata = GlobalMetadata(attr=attr)
         return metadata
 
-
-    def get_node(
+    # Creates an ET node, and assigns a node id to it.
+    # Increment the node id, to be assigned to the next ET node.
+    def create_et_node(
         self,
         name: str,
         node_type: NodeType
@@ -94,6 +63,8 @@ class MSCCL2ChakraConverter:
         node.type = node_type
         return node
 
+    # This function is called to reset the node id when starting to add nodes for a new ET trace file.
+    # There will be one ET trace file for each NPU. 
     def reset_node_id(
             self
     ): self.next_node_id = 0
@@ -104,7 +75,7 @@ class MSCCL2ChakraConverter:
         step_id: int
     ) -> Any:
         tb_id = tb_xml_node.attrib['id']
-        node = self.get_node(f"COMP_NODE_tb{tb_id}_step{step_id}",
+        node = self.create_et_node(f"COMP_NODE_tb{tb_id}_step{step_id}",
                              COMP_NODE)
         node.duration_micros = HARDCODE_COMP_TIME_NS
         return node
@@ -120,7 +91,7 @@ class MSCCL2ChakraConverter:
         tag = int(tb_xml_node.attrib['chan'])
         size = HARDCODE_COMM_SIZE
 
-        node = self.get_node(layer_name, COMM_SEND_NODE)
+        node = self.create_et_node(layer_name, COMM_SEND_NODE)
         node.attr.append(ChakraAttr(name="comm_type",
                                     int64_val=COMM_SEND_NODE))
         node.attr.append(ChakraAttr(name="comm_size",
@@ -143,7 +114,7 @@ class MSCCL2ChakraConverter:
         tag = int(tb_xml_node.attrib['chan'])
         size = HARDCODE_COMM_SIZE
 
-        node = self.get_node(layer_name, COMM_RECV_NODE)
+        node = self.create_et_node(layer_name, COMM_RECV_NODE)
         node.attr.append(ChakraAttr(name="comm_type",
                                     int64_val=COMM_RECV_NODE))
         node.attr.append(ChakraAttr(name="comm_size",
@@ -154,21 +125,22 @@ class MSCCL2ChakraConverter:
                                     uint64_val=tag))
         return node
 
+    # Add 'parent_node' as the parent to 'child_node'.
+    # Note that parent_node and child_node has to be within the same ET trace file.
     def add_parent(
         self,
         child_node: Any,
         parent_node: Any
     ) -> None:
         child_node.data_deps.append(parent_node.id)
-        # print(f'add parent {parent_node.id} to {child_node.id}, {child_node.data_deps}')
-
-# diff ctrl dep, data dep
         
     def convert(self) -> None:
         node_map = {}
         step_map = {}
         tree = ElementTree.parse(self.input_filename)
         root = tree.getroot()
+
+        # Read the XML file and create ET Trace nodes. 
         for gpu in root.findall('gpu'):
             gpu_id = int(gpu.attrib['id'])
             node_map[gpu_id] = {}
@@ -182,39 +154,36 @@ class MSCCL2ChakraConverter:
                     step_id = int(step.attrib['s'])
                     step_map[gpu_id][tb_id][step_id] = step
                     if step.attrib['type'] == "s":
-                        # print('s')
                         node = self.get_send_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id] = node
                     elif step.attrib['type'] == "r":
-                        # print('r')
                         node = self.get_recv_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id] = node
                     elif step.attrib['type'] == "rrc":
-                        # print('rrc')
                         node = self.get_recv_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id] = [node]
                         node = self.get_comp_node(tb, step_id)
                         node_map[gpu_id][tb_id][step_id].append(node)
 
+        # For each ET Trace node, add the parent dependency information, then write to ET Trace file.
         for gpu_id in node_map:
             output_filename = "%s.%s.et" % (self.output_filename, gpu_id)
             with open(output_filename, "wb") as g:
-                global_metadata = self.get_global_metadata()
+                global_metadata = self.create_global_metadata()
                 encode_message(g, global_metadata)
                 for tb_id in node_map[gpu_id]:
                     prev_node = Node()
                     for step_id, et_node in node_map[gpu_id][tb_id].items():
-                        # if gpu_id == 0:
-                        #     print(et_node)
                         if type(et_node) is list:
                             # RRC
                             recv_node = et_node[0]
                             comp_node = et_node[1]
+                            # Parent by control
                             if step_id != 0:
                                 self.add_parent(recv_node, prev_node)
                             self.add_parent(comp_node, recv_node)
 
-                            # Parent by data dep
+                            # Parent by data dependency
                             step = step_map[gpu_id][tb_id][step_id]
                             dep_tb_id = int(step.attrib['depid'])
                             dep_step_id = int(step.attrib['deps'])
@@ -236,18 +205,18 @@ class MSCCL2ChakraConverter:
                         # Parent by control
                         if step_id != 0:
                             self.add_parent(et_node, prev_node)
-                        # Parent by data dep
+                        # Parent by data dependency
                         step = step_map[gpu_id][tb_id][step_id]
                         dep_tb_id = int(step.attrib['depid'])
                         dep_step_id = int(step.attrib['deps'])
                         if dep_tb_id != -1:
                             dep_node = node_map[gpu_id][dep_tb_id][dep_step_id]
                             if type(dep_node) is list:
+                                # When msccl instr is 'rrc', dep_node is a list holding the corresponding COMM_RECV and COMP nodes. 
+                                # We only add the COMP node as the parent (COMM_RECV is already added as the parent to COMP)
                                 self.add_parent(et_node, dep_node[1])
                             else:
                                 self.add_parent(et_node, dep_node)
-                            # if gpu_id == 0:
-                            #     print(f'add parent {gpu_id}-{dep_tb_id}-{dep_step_id} to {gpu_id}-{tb_id}-{step_id}')
                         encode_message(g, et_node)
                         if gpu_id == 0:
                             print('encode node', et_node)
