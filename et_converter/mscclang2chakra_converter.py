@@ -20,7 +20,7 @@ from chakra.et_def.et_def_pb2 import (
     GlobalMetadata
 )
 
-COLLECTIVE_SIZE = int(1024 * 1024) # Bytes
+# collective_size = int(1024 * 1024) # Bytes
 HARDCODE_LOCAL_BW = 50
 # 1000 b/c microsecond to nanosecond. Refer to Workload::issue_replay
 ## HARDCODED. REMOVE WHEN IMPLEMENT COLLECTIVE API
@@ -179,12 +179,15 @@ class MSCCL2ChakraConverter:
         self,
         input_filename: str,
         output_filename: str,
+        coll_size: int,
         logger: logging.Logger
     ) -> None:
         self.input_filename = input_filename
         self.output_filename = output_filename
         self.logger = logger
         self.next_node_id = 0
+        self.collective_size = coll_size #Bytes
+        print('collective_size', self.collective_size)
 
     # Creates the global metadata info that is added to the start of all ET files.
     def create_global_metadata(self):
@@ -232,10 +235,10 @@ class MSCCL2ChakraConverter:
             num_chunks = int(gpu.attrib['i_chunks'])
             if num_chunks == 0:
                 num_chunks = int(gpu.attrib['o_chunks'])
-            chunk_size = int(COLLECTIVE_SIZE / num_chunks)
+            chunk_size = int(self.collective_size / num_chunks)
             ## HARDCODED. REMOVE WHEN IMPLEMENT COLLECTIVE API
             if 'allgather' in self.input_filename:
-                chunk_size = int(COLLECTIVE_SIZE)
+                chunk_size = int(self.collective_size)
             node_map[gpu_id] = {}
             step_map[gpu_id] = {}
             self.reset_node_id()
@@ -284,6 +287,7 @@ class MSCCL2ChakraConverter:
                     # Parent by control
                     if step_id != 0:
                         prev_step_id = step_id -1
+                        #print(gpu_id, tb_id, prev_step_id, step_id)
                         prev_node = node_map[gpu_id][tb_id][prev_step_id]
                         while type(prev_node) is MSCCLNopStep:
                             prev_step = step_map[gpu_id][tb_id][prev_step_id]
@@ -312,5 +316,5 @@ class MSCCL2ChakraConverter:
                             continue
                     
                         et_node.encode_message(g)
-                        if gpu_id == 0:
-                            print('encode node', et_node)
+                        #if gpu_id == 0:
+                            #print('encode node', et_node)
