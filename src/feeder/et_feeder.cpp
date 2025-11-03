@@ -10,6 +10,8 @@ ETFeeder::ETFeeder(string filename)
   if (!trace_.is_open()) { // Assuming a method to check if file is open
     throw std::runtime_error("Failed to open trace file: " + filename);
   }
+  dep_resolved_nodes_[CPU_QUEUE] = {};
+  dep_resolved_nodes_[GPU_QUEUE] = {};
 
   try {
     readGlobalMetadata();
@@ -24,6 +26,15 @@ ETFeeder::~ETFeeder() {}
 
 void ETFeeder::addNode(shared_ptr<ETFeederNode> node) {
   dep_graph_[node->getChakraNode()->id()] = node;
+  auto node_id = node->getChakraNode()->id();
+  if (node->getChakraNode()->data_deps().size() == 0){
+    // std::cout << "Adding node " << node_id << " as a parentless node " << std::endl;
+    if (node->is_cpu_op()) {
+      dep_resolved_nodes_[CPU_QUEUE].push(node);
+    } else {
+      dep_resolved_nodes_[GPU_QUEUE].push(node);
+    }
+  }
 }
 
 void ETFeeder::removeNode(uint64_t node_id) {
@@ -35,24 +46,21 @@ void ETFeeder::removeNode(uint64_t node_id) {
 }
 
 bool ETFeeder::hasNodesToIssue() {
-  return !(dep_graph_.empty() && dep_free_node_queue_.empty());
+  return !(dep_graph_.empty() && dep_resolved_nodes_[CPU_QUEUE].empty() && dep_resolved_nodes_[GPU_QUEUE].empty());
 }
 
-shared_ptr<ETFeederNode> ETFeeder::getNextIssuableNode() {
-  if (dep_free_node_queue_.size() != 0) {
-    shared_ptr<ETFeederNode> node = dep_free_node_queue_.top();
-    dep_free_node_id_set_.erase(node->getChakraNode()->id());
-    dep_free_node_queue_.pop();
+shared_ptr<ETFeederNode> ETFeeder::getNextIssuableNode(DepQueue which_queue) {
+  if (dep_resolved_nodes_[which_queue].size() != 0) {
+    auto old_size = dep_resolved_nodes_[which_queue].size();
+    shared_ptr<ETFeederNode> node = dep_resolved_nodes_[which_queue].front();
+    dep_resolved_nodes_[which_queue].pop();
+    auto popped_node_id = node->id();
+    auto new_size = dep_resolved_nodes_[which_queue].size();
+    // std::cout << "Pop node " << node->id() << " from " << which_queue << " queue. Old size: " << old_size << ", New size: " << new_size << std::endl;
     return node;
   } else {
     return nullptr;
   }
-}
-
-void ETFeeder::pushBackIssuableNode(uint64_t node_id) {
-  shared_ptr<ETFeederNode> node = dep_graph_[node_id];
-  dep_free_node_id_set_.emplace(node_id);
-  dep_free_node_queue_.emplace(node);
 }
 
 shared_ptr<ETFeederNode> ETFeeder::lookupNode(uint64_t node_id) {
@@ -78,8 +86,14 @@ void ETFeeder::freeChildrenNodes(uint64_t node_id) {
       }
     }
     if (child_chakra->data_deps().size() == 0) {
-      dep_free_node_id_set_.emplace(child_chakra->id());
-      dep_free_node_queue_.emplace(child);
+      auto child_node_id = child->id();
+      DepQueue child_queue_idx = UNKNOWN_VALUE;
+      if (child->is_cpu_op()) {
+        child_queue_idx = CPU_QUEUE;
+      } else {
+        child_queue_idx = GPU_QUEUE;
+      }
+      dep_resolved_nodes_[child_queue_idx].push(child);
     }
   }
 }
@@ -113,36 +127,7 @@ shared_ptr<ETFeederNode> ETFeeder::readNode() {
     }
   }
 
-  if (dep_unresolved) {
-    dep_unresolved_node_set_.emplace(node);
-  }
-
   return node;
-}
-
-void ETFeeder::resolveDep() {
-  for (auto it = dep_unresolved_node_set_.begin();
-       it != dep_unresolved_node_set_.end();) {
-    shared_ptr<ETFeederNode> node = *it;
-    vector<uint64_t> dep_unresolved_parent_ids =
-        node->getDepUnresolvedParentIDs();
-    for (auto inner_it = dep_unresolved_parent_ids.begin();
-         inner_it != dep_unresolved_parent_ids.end();) {
-      auto parent_node = dep_graph_.find(*inner_it);
-      if (parent_node != dep_graph_.end()) {
-        parent_node->second->addChild(node);
-        inner_it = dep_unresolved_parent_ids.erase(inner_it);
-      } else {
-        ++inner_it;
-      }
-    }
-    if (dep_unresolved_parent_ids.size() == 0) {
-      it = dep_unresolved_node_set_.erase(it);
-    } else {
-      node->setDepUnresolvedParentIDs(dep_unresolved_parent_ids);
-      ++it;
-    }
-  }
 }
 
 void ETFeeder::readNextWindow() {
@@ -161,16 +146,5 @@ void ETFeeder::readNextWindow() {
     addNode(new_node);
     ++num_read;
 
-    resolveDep();
-  } while ((num_read < window_size_) || (dep_unresolved_node_set_.size() != 0));
-
-  for (auto node_id_node : dep_graph_) {
-    uint64_t node_id = node_id_node.first;
-    shared_ptr<ETFeederNode> node = node_id_node.second;
-    if ((dep_free_node_id_set_.count(node_id) == 0) &&
-        (node->getChakraNode()->data_deps().size() == 0)) {
-      dep_free_node_id_set_.emplace(node_id);
-      dep_free_node_queue_.emplace(node);
-    }
-  }
+  } while ((num_read < window_size_));
 }

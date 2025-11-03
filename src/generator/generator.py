@@ -194,6 +194,22 @@ def generate_comm_coll_node(num_npus: int, comm_size: int, comm_type: int, node_
             node.attr.extend([get_comm_type_attr(comm_type), ChakraAttr(name="comm_size", int64_val=comm_size)])
             encode_message(et, node)
 
+def multiple_coll_node_allgather (num_npus: int, comm_size: int) -> None:
+    """Generate multiple allreduce communication collective node."""
+    comm_count = 150
+    for npu_id in range (num_npus):
+        output_filename = f"ALL_GATHER_{num_npus}_{comm_size / 1048576}.{npu_id}.et"
+        parent_node_id = -1
+        with open(output_filename, "wb") as et:
+            encode_message(et, GlobalMetadata(version="0.0.4"))
+            for node_id in range(comm_count):
+                node = get_node(f"ALL_GATHER_{node_id}", COMM_COLL_NODE)
+                node.attr.append(ChakraAttr(name="is_cpu_op", bool_val=False))
+                node.attr.extend([get_comm_type_attr(ALL_GATHER), ChakraAttr(name="comm_size", int64_val=comm_size)])
+                if parent_node_id != -1:
+                    node.data_deps.append(parent_node_id)
+                parent_node_id = node.id
+                encode_message(et, node)
 
 def one_comm_coll_node_allreduce(num_npus: int, comm_size: int) -> None:
     """Generate one AllReduce communication collective node."""
@@ -260,21 +276,22 @@ def main() -> None:
         "--default_comm_size", type=int, default=65536, help="Default communication size of communication nodes"
     )
     args = parser.parse_args()
+    multiple_coll_node_allgather(args.num_npus, args.default_comm_size)
 
-    one_metadata_node_all_types(args.num_npus)
-    one_remote_mem_load_node(args.num_npus, args.default_tensor_size)
-    one_remote_mem_store_node(args.num_npus, args.default_tensor_size)
-    one_comp_node(args.num_npus, args.default_runtime)
-    two_comp_nodes_independent(args.num_npus, args.default_runtime)
-    two_comp_nodes_dependent(args.num_npus, args.default_runtime)
-    one_comm_coll_node_allreduce(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_alltoall(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_allgather(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_reducescatter(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_broadcast(args.num_npus, args.default_comm_size)
-    one_comm_coll_node_barrier(args.num_npus)
-    one_comm_send_node(args.num_npus, args.default_tensor_size)
-    one_comm_recv_node(args.num_npus, args.default_tensor_size)
+    # one_metadata_node_all_types(args.num_npus)
+    # one_remote_mem_load_node(args.num_npus, args.default_tensor_size)
+    # one_remote_mem_store_node(args.num_npus, args.default_tensor_size)
+    # one_comp_node(args.num_npus, args.default_runtime)
+    # two_comp_nodes_independent(args.num_npus, args.default_runtime)
+    # two_comp_nodes_dependent(args.num_npus, args.default_runtime)
+    # one_comm_coll_node_allreduce(args.num_npus, args.default_comm_size)
+    # one_comm_coll_node_alltoall(args.num_npus, args.default_comm_size)
+    # one_comm_coll_node_allgather(args.num_npus, args.default_comm_size)
+    # one_comm_coll_node_reducescatter(args.num_npus, args.default_comm_size)
+    # one_comm_coll_node_broadcast(args.num_npus, args.default_comm_size)
+    # one_comm_coll_node_barrier(args.num_npus)
+    # one_comm_send_node(args.num_npus, args.default_tensor_size)
+    # one_comm_recv_node(args.num_npus, args.default_tensor_size)
 
 
 if __name__ == "__main__":
