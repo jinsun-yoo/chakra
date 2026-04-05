@@ -13,12 +13,18 @@ namespace FeederV3 {
 
 class _DependancyLayer {
  public:
-  _DependancyLayer() = default;
+  _DependancyLayer() {
+    this->dependancy_free_nodes[HardwareResource::UNKNOWN] = {};
+    this->dependancy_free_nodes[HardwareResource::CPU] = {};
+    this->dependancy_free_nodes[HardwareResource::GPU_COMP] = {};
+    this->dependancy_free_nodes[HardwareResource::GPU_COMM] = {};
+  };
   ~_DependancyLayer() {
     this->child_map_parent.clear();
     this->parent_map_child.clear();
     this->dependancy_free_nodes.clear();
     this->ongoing_nodes.clear();
+    this->node_resource_map.clear();
   }
   /**
    * @brief The node has three possible states in a process of resolving
@@ -32,7 +38,7 @@ class _DependancyLayer {
    *  Finished --add--> Pending --take--> Taken --finish--> Finished
    *  Taken --push_back--> Pending
    */
-  void add_node(const NodeId& node, const std::unordered_set<NodeId>& parents);
+  void add_node(const NodeId& node, const std::unordered_set<NodeId>& parents, HardwareResource resource_type = HardwareResource::UNKNOWN);
   void add_node_children(
       const NodeId& node,
       const std::unordered_set<NodeId>& children);
@@ -41,16 +47,17 @@ class _DependancyLayer {
   void push_back_node(const NodeId& node);
   void resolve_dependancy_free_nodes();
 
-  const std::unordered_set<NodeId>& get_dependancy_free_nodes() const;
+  const NodeId get_dependancy_free_nodes(HardwareResource resource_type = HardwareResource::UNKNOWN) const;
   const std::unordered_set<NodeId>& get_ongoing_nodes() const;
   const std::unordered_set<NodeId>& get_children(NodeId node) const;
   const std::unordered_set<NodeId>& get_parents(NodeId node) const;
-
- private:
   std::unordered_map<NodeId, std::unordered_set<NodeId>> child_map_parent;
   std::unordered_map<NodeId, std::unordered_set<NodeId>> parent_map_child;
-  std::unordered_set<NodeId> dependancy_free_nodes;
+  std::unordered_map<HardwareResource, std::set<NodeId>> dependancy_free_nodes;
+
+ private:
   std::unordered_set<NodeId> ongoing_nodes;
+  std::unordered_map<NodeId, HardwareResource> node_resource_map;
   bool dirty = true;
   void _helper_allocate_bucket(NodeId node_id);
   std::shared_mutex mutex;
@@ -65,13 +72,15 @@ class DependancyResolver {
         throw std::runtime_error(
             "Should not create a dependancy resolver that resolves neither data nor control dependancy");
   }
-  void add_node(const ChakraNode& node);
+  void add_node(const ChakraNode& node, HardwareResource resource_type = HardwareResource::UNKNOWN);
   void take_node(const NodeId& node);
   void push_back_node(const NodeId& node);
   void finish_node(const NodeId& node);
   void resolve_dependancy_free_nodes();
 
-  const std::unordered_set<NodeId>& get_dependancy_free_nodes() const;
+  const NodeId get_dependancy_free_nodes(HardwareResource resource_type) const;
+  bool empty_dependency_free_nodes() const;
+  // const std::unordered_set<NodeId>& get_dependancy_free_nodes() const;
   const std::unordered_set<NodeId>& get_ongoing_nodes() const;
   const _DependancyLayer& get_data_dependancy() const;
   const _DependancyLayer& get_ctrl_dependancy() const;

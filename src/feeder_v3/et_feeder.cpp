@@ -20,14 +20,16 @@ void ETFeeder::removeNode(const NodeId& node_id) {
 }
 
 bool ETFeeder::hasNodesToIssue() {
-  return !this->dependancy_resolver.get_dependancy_free_nodes().empty();
+  return true;
+  // return !this->dependancy_resolver.get_dependancy_free_nodes().empty();
 }
 
 std::shared_ptr<ETFeederNode> ETFeeder::getNextIssuableNode() {
-  const auto node_id =
-      *(this->dependancy_resolver.get_dependancy_free_nodes().begin());
-  this->dependancy_resolver.take_node(node_id);
-  return this->lookupNode(node_id);
+  return nullptr;
+  // const auto node_id =
+  //     *(this->dependancy_resolver.get_dependancy_free_nodes().begin());
+  // this->dependancy_resolver.take_node(node_id);
+  // return this->lookupNode(node_id);
 }
 
 void ETFeeder::pushBackIssuableNode(const NodeId& node_id) {
@@ -63,8 +65,30 @@ void ETFeeder::build_index_dependancy_cache() {
     const auto& node_id = node.id();
     this->index_map[node_id] = last_pos;
     last_pos = this->chakra_file.tellg();
+    // Get hardware resource this node will use
+    // Logic from AstraSim::HardwareResources
+    HardwareResource resource_type = HardwareResource::UNKNOWN;
+    for (auto& attr : node.attr()) {
+      if (attr.name() == "is_cpu_op") {
+        assert (attr.value_case() == ChakraAttr::kBoolVal);
+        bool is_cpu_op = attr.bool_val();
+        if (is_cpu_op) {
+          resource_type = HardwareResource::CPU;
+        }
+        break;
+      }
+    }
+    if (node.type() == ChakraProtoMsg::NodeType::COMP_NODE) {
+      resource_type = HardwareResource::GPU_COMP;
+    }
+    if (node.type() == ChakraProtoMsg::NodeType::COMM_COLL_NODE) {
+      resource_type = HardwareResource::GPU_COMM;
+    }
+    assert(resource_type != HardwareResource::UNKNOWN &&
+           "Failed to determine hardware resource for node");
+
     // build dependancy
-    this->dependancy_resolver.add_node(node);
+    this->dependancy_resolver.add_node(node, resource_type);
   }
   this->chakra_file.clear();
   this->chakra_file.seekg(0, std::ios::beg);
@@ -97,24 +121,24 @@ void ETFeeder::graph_sanity_check() {
   const auto& data_dep = this->dependancy_resolver.get_data_dependancy();
   const auto& ctrl_dep = this->dependancy_resolver.get_ctrl_dependancy();
   const auto& enabled_dep = this->dependancy_resolver.get_enabled_dependancy();
-  for (const auto& node : data_dep.get_dependancy_free_nodes()) {
-    if (this->index_map.find(node) == this->index_map.end())
-      throw std::runtime_error(
-          "Node " + std::to_string(node) +
-          " in data_dep graph, but not found in index, file might be corrupted");
-  }
-  for (const auto& node : ctrl_dep.get_dependancy_free_nodes()) {
-    if (this->index_map.find(node) == this->index_map.end())
-      throw std::runtime_error(
-          "Node " + std::to_string(node) +
-          " in ctrl_dep graph, but not found in index, file might be corrupted");
-  }
-  for (const auto& node : enabled_dep.get_dependancy_free_nodes()) {
-    if (this->index_map.find(node) == this->index_map.end())
-      throw std::runtime_error(
-          "Node " + std::to_string(node) +
-          " in all_dep graph, but not found in index, file might be corrupted");
-  }
+  // for (const auto& node : data_dep.get_dependancy_free_nodes()) {
+  //   if (this->index_map.find(node) == this->index_map.end())
+  //     throw std::runtime_error(
+  //         "Node " + std::to_string(node) +
+  //         " in data_dep graph, but not found in index, file might be corrupted");
+  // }
+  // for (const auto& node : ctrl_dep.get_dependancy_free_nodes()) {
+  //   if (this->index_map.find(node) == this->index_map.end())
+  //     throw std::runtime_error(
+  //         "Node " + std::to_string(node) +
+  //         " in ctrl_dep graph, but not found in index, file might be corrupted");
+  // }
+  // for (const auto& node : enabled_dep.get_dependancy_free_nodes()) {
+  //   if (this->index_map.find(node) == this->index_map.end())
+  //     throw std::runtime_error(
+  //         "Node " + std::to_string(node) +
+  //         " in all_dep graph, but not found in index, file might be corrupted");
+  // }
 }
 
 const uint64_t& ETFeeder::feeder_id() const {

@@ -9,7 +9,8 @@ using namespace Chakra::FeederV3;
 
 void _DependancyLayer::add_node(
     const NodeId& node,
-    const std::unordered_set<NodeId>& parents) {
+    const std::unordered_set<NodeId>& parents,
+    HardwareResource resource_type) {
   std::unique_lock<std::shared_mutex> lock(this->mutex);
   this->dirty = true;
   this->_helper_allocate_bucket(node);
@@ -18,6 +19,7 @@ void _DependancyLayer::add_node(
     this->child_map_parent[node].insert(parent);
     this->parent_map_child[parent].insert(node);
   }
+  this->node_resource_map[node] = resource_type;
 }
 
 void _DependancyLayer::add_node_children(
@@ -39,8 +41,8 @@ void _DependancyLayer::take_node(const NodeId& node) {
     throw std::runtime_error(
         "dependancy layer is dirty, resolve_dependancy_free_nodes should be called first");
   }
-  if (this->dependancy_free_nodes.find(node) ==
-      this->dependancy_free_nodes.end()) {
+  if (this->dependancy_free_nodes[this->node_resource_map[node]].find(node) ==
+      this->dependancy_free_nodes[this->node_resource_map[node]].end()) {
     const auto& parents = this->child_map_parent[node];
     throw std::runtime_error(
         "Node " + std::to_string(node) +
@@ -50,7 +52,7 @@ void _DependancyLayer::take_node(const NodeId& node) {
     throw std::runtime_error("Node is already taken");
   }
   this->ongoing_nodes.insert(node);
-  this->dependancy_free_nodes.erase(node);
+  this->dependancy_free_nodes[this->node_resource_map[node]].erase(node);
 }
 
 void _DependancyLayer::finish_node(const NodeId& node) {
@@ -72,7 +74,7 @@ void _DependancyLayer::finish_node(const NodeId& node) {
     }
     this->child_map_parent[child].erase(node);
     if (this->child_map_parent[child].empty()) {
-      this->dependancy_free_nodes.insert(child);
+      this->dependancy_free_nodes[this->node_resource_map[child]].insert(child);
     }
   }
   this->child_map_parent.erase(node);
@@ -89,19 +91,19 @@ void _DependancyLayer::push_back_node(const NodeId& node) {
     throw std::runtime_error("Node is not taken");
   }
   this->ongoing_nodes.erase(node);
-  this->dependancy_free_nodes.insert(node);
+  this->dependancy_free_nodes[this->node_resource_map[node]].insert(node);
 }
 
 void _DependancyLayer::resolve_dependancy_free_nodes() {
   std::unique_lock<std::shared_mutex> lock(this->mutex);
-  if ((!this->dependancy_free_nodes.empty()) || (!this->ongoing_nodes.empty()))
+  if ((!this->dependancy_free_nodes[HardwareResource::UNKNOWN].empty()) || (!this->dependancy_free_nodes[HardwareResource::CPU].empty()) || (!this->dependancy_free_nodes[HardwareResource::GPU_COMP].empty()) || (!this->dependancy_free_nodes[HardwareResource::GPU_COMM].empty()) || (!this->ongoing_nodes.empty()))
     throw std::runtime_error(
         "resolve_dependancy_free_nodes after initialization is not supported yet!");
   for (auto& it : this->child_map_parent) {
     auto& node = it.first;
     auto& parents = it.second;
     if (parents.empty())
-      this->dependancy_free_nodes.insert(node);
+      this->dependancy_free_nodes[this->node_resource_map[node]].insert(node);
   }
   if (this->dependancy_free_nodes.empty())
     throw std::runtime_error(
@@ -109,10 +111,31 @@ void _DependancyLayer::resolve_dependancy_free_nodes() {
   this->dirty = false;
 }
 
-const std::unordered_set<NodeId>& _DependancyLayer::get_dependancy_free_nodes()
+const NodeId _DependancyLayer::get_dependancy_free_nodes(HardwareResource resource_type)
     const {
-  return this->dependancy_free_nodes;
+  const auto& bucket = this->dependancy_free_nodes.at(resource_type);
+  if (!bucket.empty()) {
+    return *bucket.begin();
+  }
+  return UINT64_MAX;
 }
+
+bool DependancyResolver::empty_dependency_free_nodes() const {
+  const auto& bucket_unknown = this->enabled_dependancy.dependancy_free_nodes.at(HardwareResource::UNKNOWN);
+  const auto& bucket_cpu = this->enabled_dependancy.dependancy_free_nodes.at(HardwareResource::CPU);
+  const auto& bucket_gpu_comp = this->enabled_dependancy.dependancy_free_nodes.at(HardwareResource::GPU_COMP);
+  const auto& bucket_gpu_comm = this->enabled_dependancy.dependancy_free_nodes.at(HardwareResource::GPU_COMM);
+  return bucket_unknown.empty() && bucket_cpu.empty() && bucket_gpu_comp.empty() && bucket_gpu_comm.empty();
+}
+
+// const NodeId _DependancyLayer::get_dependancy_free_nodes()
+//     const {
+//   const auto& bucket = this->dependancy_free_nodes.at(resource_type);
+//   if (!bucket.empty()) {
+//     return *bucket.begin();
+//   }
+//   return UINT64_MAX;
+// }
 
 const std::unordered_set<NodeId>& _DependancyLayer::get_children(
     NodeId node) const {
@@ -138,7 +161,7 @@ void _DependancyLayer::_helper_allocate_bucket(NodeId node_id) {
   }
 }
 
-void DependancyResolver::add_node(const ChakraNode& node) {
+void DependancyResolver::add_node(const ChakraNode& node, HardwareResource resource_type) {
   NodeId node_id = node.id();
   std::unordered_set<NodeId> parents, enabled_parents;
   for (auto& parent : node.data_deps()) {
@@ -146,7 +169,7 @@ void DependancyResolver::add_node(const ChakraNode& node) {
       enabled_parents.insert(parent);
     parents.insert(parent);
   }
-  this->data_dependancy.add_node(node_id, parents);
+  this->data_dependancy.add_node(node_id, parents, resource_type);
   parents.clear();
 
   for (auto& parent : node.ctrl_deps()) {
@@ -154,10 +177,10 @@ void DependancyResolver::add_node(const ChakraNode& node) {
       enabled_parents.insert(parent);
     parents.insert(parent);
   }
-  this->ctrl_dependancy.add_node(node_id, parents);
+  this->ctrl_dependancy.add_node(node_id, parents, resource_type);
   parents.clear();
 
-  this->enabled_dependancy.add_node(node_id, enabled_parents);
+  this->enabled_dependancy.add_node(node_id, enabled_parents, resource_type);
 }
 
 void DependancyResolver::take_node(const NodeId& node) {
@@ -184,10 +207,11 @@ void DependancyResolver::resolve_dependancy_free_nodes() {
   this->enabled_dependancy.resolve_dependancy_free_nodes();
 }
 
-const std::unordered_set<NodeId>& DependancyResolver::
-    get_dependancy_free_nodes() const {
-  return this->enabled_dependancy.get_dependancy_free_nodes();
+const NodeId DependancyResolver::
+    get_dependancy_free_nodes(HardwareResource resource_type) const {
+  return this->enabled_dependancy.get_dependancy_free_nodes(resource_type);
 }
+
 
 const std::unordered_set<NodeId>& DependancyResolver::get_ongoing_nodes()
     const {

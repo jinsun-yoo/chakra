@@ -24,6 +24,13 @@ constexpr static bool RESOLVE_CTRL_DEPS = true;
 
 constexpr static size_t DEFAULT_PROTOBUF_BUFFER_SIZE = 16384;
 
+enum class HardwareResource {
+    UNKNOWN = 0,
+    CPU = 1,
+    GPU_COMP = 2,
+    GPU_COMM = 3,
+};
+
 } // namespace FeederV3
 } // namespace Chakra
 
