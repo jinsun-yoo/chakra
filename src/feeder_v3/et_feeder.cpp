@@ -79,7 +79,9 @@ void ETFeeder::build_index_dependancy_cache() {
       }
     }
     if (node.type() == ChakraProtoMsg::NodeType::COMP_NODE) {
-      resource_type = HardwareResource::GPU_COMP;
+      if (!(resource_type == HardwareResource::CPU)) {
+        resource_type = HardwareResource::GPU_COMP;
+      }
     }
     if (node.type() == ChakraProtoMsg::NodeType::COMM_COLL_NODE) {
       resource_type = HardwareResource::GPU_COMM;

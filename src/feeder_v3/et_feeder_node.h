@@ -81,6 +81,8 @@ class ETFeederNode {
   std::string get_outputs_shapes(const std::string& default_ = "") const;
   std::string get_outputs_types(const std::string& default_ = "") const;
 
+  std::shared_ptr<const ChakraNode> get_chakra_node() const;
+
  private:
   template <typename T>
   class _TypeConverter {
@@ -142,7 +144,6 @@ class ETFeederNode {
   NodeId node_id;
   mutable std::weak_ptr<const ChakraNode> chakra_node;
 
-  std::shared_ptr<const ChakraNode> get_chakra_node() const;
 };
 
 template <typename T>

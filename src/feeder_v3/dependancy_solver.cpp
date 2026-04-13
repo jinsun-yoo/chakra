@@ -102,10 +102,10 @@ void _DependancyLayer::resolve_dependancy_free_nodes() {
   for (auto& it : this->child_map_parent) {
     auto& node = it.first;
     auto& parents = it.second;
-    if (parents.empty())
+    if (parents.empty() && node != 0)
       this->dependancy_free_nodes[this->node_resource_map[node]].insert(node);
   }
-  if (this->dependancy_free_nodes.empty())
+  if ((this->dependancy_free_nodes[HardwareResource::CPU].empty()) && (this->dependancy_free_nodes[HardwareResource::GPU_COMP].empty()) && (this->dependancy_free_nodes[HardwareResource::GPU_COMM].empty()))
     throw std::runtime_error(
         "No dependancy free nodes found, there might be deadlocks");
   this->dirty = false;
@@ -165,6 +165,9 @@ void DependancyResolver::add_node(const ChakraNode& node, HardwareResource resou
   NodeId node_id = node.id();
   std::unordered_set<NodeId> parents, enabled_parents;
   for (auto& parent : node.data_deps()) {
+    if (parent == 0) {
+      continue;
+    }
     if (this->enable_data_deps)
       enabled_parents.insert(parent);
     parents.insert(parent);
@@ -173,6 +176,9 @@ void DependancyResolver::add_node(const ChakraNode& node, HardwareResource resou
   parents.clear();
 
   for (auto& parent : node.ctrl_deps()) {
+    if (parent == 0) {
+      continue;
+    }
     if (this->enable_ctrl_deps)
       enabled_parents.insert(parent);
     parents.insert(parent);
