@@ -70,8 +70,16 @@ void ETFeeder::build_index_dependancy_cache() {
     HardwareResource resource_type = HardwareResource::UNKNOWN;
     for (auto& attr : node.attr()) {
       if (attr.name() == "is_cpu_op") {
-        assert (attr.value_case() == ChakraAttr::kBoolVal);
-        bool is_cpu_op = attr.bool_val();
+        bool is_cpu_op = false;
+        if (attr.value_case() == ChakraAttr::kBoolVal) {
+          bool is_cpu_op = attr.bool_val();
+        } else if (attr.value_case() == ChakraAttr::kInt32Val) {
+          bool is_cpu_op = attr.int32_val() == 1;
+        } else {
+          assert(false);
+        }
+        // assert (attr.value_case() == ChakraAttr::kBoolVal);
+        // bool is_cpu_op = attr.bool_val();
         if (is_cpu_op) {
           resource_type = HardwareResource::CPU;
         }
@@ -86,7 +94,7 @@ void ETFeeder::build_index_dependancy_cache() {
     if (node.type() == ChakraProtoMsg::NodeType::COMM_COLL_NODE) {
       resource_type = HardwareResource::GPU_COMM;
     }
-if (node.type() == ChakraProtoMsg::NodeType::COMM_SEND_NODE) {
+    if (node.type() == ChakraProtoMsg::NodeType::COMM_SEND_NODE) {
       resource_type = HardwareResource::GPU_COMM;
     }
     if (node.type() == ChakraProtoMsg::NodeType::COMM_RECV_NODE) {
