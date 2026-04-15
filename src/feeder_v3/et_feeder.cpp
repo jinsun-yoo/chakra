@@ -86,6 +86,12 @@ void ETFeeder::build_index_dependancy_cache() {
     if (node.type() == ChakraProtoMsg::NodeType::COMM_COLL_NODE) {
       resource_type = HardwareResource::GPU_COMM;
     }
+if (node.type() == ChakraProtoMsg::NodeType::COMM_SEND_NODE) {
+      resource_type = HardwareResource::GPU_COMM;
+    }
+    if (node.type() == ChakraProtoMsg::NodeType::COMM_RECV_NODE) {
+      resource_type = HardwareResource::GPU_COMM;
+    }
     assert(resource_type != HardwareResource::UNKNOWN &&
            "Failed to determine hardware resource for node");
 
