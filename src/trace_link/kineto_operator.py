@@ -83,13 +83,14 @@ class KinetoOperator:
         Notably, 'user_annotation' operators often include the duration of CPU operator launch times.
         Ignoring the duration measured in 'user_annotation' can lead to inaccuracies in simulation.
         An exception to this is 'ProfilerStep', which should be completely ignored.
+        Also 'Backward ' and 'Forward ', added at PP.
         Ideally, a more general rule should be developed to identify such exception nodes.
 
         Returns
             bool: True if the operator is simulatable, False otherwise.
         """
         simulatable_categories = {"cpu_op", "user_annotation"}
-        name_exceptions = {"ProfilerStep"}
+        name_exceptions = {"ProfilerStep", "Backward ", "Forward "}
         if self.category in simulatable_categories and all(exc not in self.name for exc in name_exceptions):
             return True
         return False
