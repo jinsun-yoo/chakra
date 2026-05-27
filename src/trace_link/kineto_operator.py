@@ -55,6 +55,8 @@ class KinetoOperator:
         self.rf_id: Optional[int] = kineto_op.get("args", {}).get("Record function id", None)
         self.correlation: int = kineto_op.get("args", {}).get("correlation", -1)
         self.pg_name: Optional[str] = kineto_op.get("args", {}).get("Process Group Name", None)
+        self.dst_rank: Optional[int] = kineto_op.get("args", {}).get("Dst Rank", None)
+        self.src_rank: Optional[int] = kineto_op.get("args", {}).get("Src Rank", None)
 
     def __repr__(self) -> str:
         """

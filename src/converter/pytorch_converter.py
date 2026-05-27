@@ -262,6 +262,16 @@ class PyTorchConverter:
                                     if pytorch_gpu_node.pg_name != ""
                                     else []
                                 ),
+                                *(
+                                    [ChakraAttr(name="comm_dst", int32_val=pytorch_gpu_node.dst_rank)]
+                                    if pytorch_gpu_node.dst_rank is not None
+                                    else []
+                                ),
+                                *(
+                                    [ChakraAttr(name="comm_src", int32_val=pytorch_gpu_node.src_rank)]
+                                    if pytorch_gpu_node.src_rank is not None
+                                    else []
+                                ),
                             ]
                         )
 

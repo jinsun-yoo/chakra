@@ -91,6 +91,18 @@ class TraceLinker:
             kineto_external_id_to_kineto_op_map,
         )
 
+        for node in chakra_execution_trace_plus_data["nodes"]:
+            if "ncclDevKernel_SendRecv" in node.get("name", ""):
+                if "dst_rank" not in node:
+                    node["dst_rank"] = rank
+                if "src_rank" not in node:
+                    node["src_rank"] = rank
+                if node["dst_rank"] == node["src_rank"]:
+                    logging.warning(
+                        f"SendRecv node '{node.get('name')}' (id={node.get('id')}) has "
+                        f"dst_rank == src_rank == {node['dst_rank']}. This is likely incorrect."
+                    )
+
         self.dump_chakra_execution_trace_plus(chakra_execution_trace_plus_data, output_file)
 
     def load_sync_dependencies(
@@ -635,6 +647,12 @@ class TraceLinker:
 
             logging.debug(f"group_gpu_ops_by_cpu_launchers '{parent_cpu_op.name}' -> '{gpu_op.name}'")
 
+            if "ncclDevKernel_SendRecv" in gpu_op.name:
+                if parent_cpu_op.dst_rank is not None:
+                    gpu_op.dst_rank = parent_cpu_op.dst_rank
+                if parent_cpu_op.src_rank is not None:
+                    gpu_op.src_rank = parent_cpu_op.src_rank
+
             cpu_external_id_to_gpu_ops_map.setdefault(parent_cpu_op.external_id, []).append(gpu_op)
 
         return cpu_external_id_to_gpu_ops_map
@@ -962,6 +980,16 @@ class TraceLinker:
                     **(
                         {"pg_name": gpu_op.pg_name}
                         if gpu_op.is_inter_gpu_comms_op() and gpu_op.pg_name is not None
+                        else {}
+                    ),
+                    **(
+                        {"dst_rank": gpu_op.dst_rank}
+                        if "ncclDevKernel_SendRecv" in gpu_op.name and gpu_op.dst_rank is not None
+                        else {}
+                    ),
+                    **(
+                        {"src_rank": gpu_op.src_rank}
+                        if "ncclDevKernel_SendRecv" in gpu_op.name and gpu_op.src_rank is not None
                         else {}
                     ),
                 }

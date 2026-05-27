@@ -117,6 +117,8 @@ class PyTorchNode:
         # In SendRecv nodes, pg_name is in the attrs if exists.
         # Otherwise, pg_name is not present.
         self.pg_name = node_data.get("pg_name", "")
+        self.dst_rank = node_data.get("dst_rank", None)
+        self.src_rank = node_data.get("src_rank", None)
 
         for attr in node_data.get("attrs", []):
             setattr(self, attr["name"], attr["value"])
