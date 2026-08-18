@@ -12,6 +12,8 @@ ETFeeder::ETFeeder(string filename)
   }
   dep_resolved_nodes_[CPU_QUEUE] = {};
   dep_resolved_nodes_[GPU_QUEUE] = {};
+  initial_dep_resolved_nodes_[CPU_QUEUE] = {};
+  initial_dep_resolved_nodes_[GPU_QUEUE] = {};
 
   try {
     readGlobalMetadata();
@@ -33,11 +35,12 @@ void ETFeeder::addNode(shared_ptr<ETFeederNode> node) {
   remaining_dep_count_[node_id] = num_deps;
   if (num_deps == 0){
     // std::cout << "Adding node " << node_id << " as a parentless node " << std::endl;
-    if (node->is_cpu_op()) {
-      dep_resolved_nodes_[CPU_QUEUE].push(node);
-    } else {
-      dep_resolved_nodes_[GPU_QUEUE].push(node);
-    }
+    DepQueue queue_idx = node->is_cpu_op() ? CPU_QUEUE : GPU_QUEUE;
+    dep_resolved_nodes_[queue_idx].push(node);
+    // Also record this node in the read-only snapshot of initially
+    // dep-free nodes, so resetIteration() can restore dep_resolved_nodes_
+    // without re-scanning the whole dep_graph_.
+    initial_dep_resolved_nodes_[queue_idx].push(node);
   }
 }
 
@@ -58,17 +61,10 @@ void ETFeeder::resetIteration() {
   // Flush the per-iteration dependency-resolution state back to its initial
   // (read-only) values.
   remaining_dep_count_ = initial_dep_count_;
-  dep_resolved_nodes_[CPU_QUEUE] = {};
-  dep_resolved_nodes_[GPU_QUEUE] = {};
-  for (const auto& [node_id, node] : dep_graph_) {
-    if (remaining_dep_count_[node_id] == 0) {
-      if (node->is_cpu_op()) {
-        dep_resolved_nodes_[CPU_QUEUE].push(node);
-      } else {
-        dep_resolved_nodes_[GPU_QUEUE].push(node);
-      }
-    }
-  }
+  // Restore dep_resolved_nodes_ from the read-only snapshot taken when the
+  // trace was first loaded, instead of re-deriving it by scanning every node
+  // in dep_graph_ and checking remaining_dep_count_ == 0.
+  dep_resolved_nodes_ = initial_dep_resolved_nodes_;
   // Note: et_complete_ intentionally left untouched. It reflects whether the
   // underlying trace file stream has been fully consumed, which is a
   // property of the file, not of a single iteration, and must not be reset.

@@ -65,6 +65,12 @@ class ETFeeder {
   std::unordered_map<uint64_t, std::shared_ptr<ETFeederNode>> dep_graph_{};
   // A map that goes from "which queue" to a queue of ET Nodes that have all deps. resolved and ready to launch.
   std::unordered_map<DepQueue, std::queue<std::shared_ptr<ETFeederNode>>> dep_resolved_nodes_{};
+  // Read-only snapshot of dep_resolved_nodes_ as it looked right after the
+  // trace was first loaded (i.e. the set of parentless/dep-free nodes).
+  // Populated once in addNode() and never mutated afterwards, so
+  // resetIteration() can restore dep_resolved_nodes_ via direct assignment
+  // instead of re-scanning the entire dep_graph_ every iteration.
+  std::unordered_map<DepQueue, std::queue<std::shared_ptr<ETFeederNode>>> initial_dep_resolved_nodes_{};
 
   // Read-only per-node count of unresolved data_deps, as seen when the node
   // was first loaded from the trace. Never mutated after being set, so it
