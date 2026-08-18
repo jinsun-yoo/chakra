@@ -39,6 +39,7 @@ class ETFeeder {
   // void pushBackIssuableNode(uint64_t node_id);
   std::shared_ptr<ETFeederNode> lookupNode(uint64_t node_id);
   void freeChildrenNodes(uint64_t node_id);
+  void resetIteration();
 
   std::priority_queue<
       std::shared_ptr<ETFeederNode>,
@@ -55,9 +56,25 @@ class ETFeeder {
   const uint32_t window_size_;
   bool et_complete_;
 
+  // Read-only, populated once when the trace is first loaded. Never mutated
+  // afterwards so it can be reused as the pristine source of truth for every
+  // iteration.
+  std::unordered_map<uint64_t, std::shared_ptr<ETFeederNode>> initial_dep_graph_{};
+  // Per-iteration map. Entries are erased via removeNode() as nodes complete
+  // and repopulated from initial_dep_graph_ at the start of each iteration.
   std::unordered_map<uint64_t, std::shared_ptr<ETFeederNode>> dep_graph_{};
   // A map that goes from "which queue" to a queue of ET Nodes that have all deps. resolved and ready to launch.
   std::unordered_map<DepQueue, std::queue<std::shared_ptr<ETFeederNode>>> dep_resolved_nodes_{};
+
+  // Read-only per-node count of unresolved data_deps, as seen when the node
+  // was first loaded from the trace. Never mutated after being set, so it
+  // can be reused across iterations without touching the shared, immutable
+  // ETFeederNode/proto objects in initial_dep_graph_.
+  std::unordered_map<uint64_t, uint32_t> initial_dep_count_{};
+  // Per-iteration, mutable count of remaining unresolved data_deps for each
+  // node. Decremented in freeChildrenNodes() as parents complete, and reset
+  // from initial_dep_count_ at the start of each iteration.
+  std::unordered_map<uint64_t, uint32_t> remaining_dep_count_{};
 };
 
 } // namespace Chakra

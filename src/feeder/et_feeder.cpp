@@ -16,6 +16,7 @@ ETFeeder::ETFeeder(string filename)
   try {
     readGlobalMetadata();
     readNextWindow();
+    initial_dep_graph_ = dep_graph_;
   } catch (const std::exception& e) {
     cerr << "Error in constructor: " << e.what() << endl;
     throw; // Rethrow the exception for caller to handle
@@ -25,9 +26,12 @@ ETFeeder::ETFeeder(string filename)
 ETFeeder::~ETFeeder() {}
 
 void ETFeeder::addNode(shared_ptr<ETFeederNode> node) {
-  dep_graph_[node->getChakraNode()->id()] = node;
   auto node_id = node->getChakraNode()->id();
-  if (node->getChakraNode()->data_deps().size() == 0){
+  dep_graph_[node_id] = node;
+  uint32_t num_deps = node->getChakraNode()->data_deps().size();
+  initial_dep_count_[node_id] = num_deps;
+  remaining_dep_count_[node_id] = num_deps;
+  if (num_deps == 0){
     // std::cout << "Adding node " << node_id << " as a parentless node " << std::endl;
     if (node->is_cpu_op()) {
       dep_resolved_nodes_[CPU_QUEUE].push(node);
@@ -43,6 +47,31 @@ void ETFeeder::removeNode(uint64_t node_id) {
   if (!et_complete_ && (dep_free_node_queue_.size() < window_size_)) {
     readNextWindow();
   }
+}
+
+void ETFeeder::resetIteration() {
+  // Restore the per-iteration map from the pristine, read-only source. Both
+  // maps hold the same underlying shared_ptr<ETFeederNode> objects, but since
+  // those objects are no longer mutated (see freeChildrenNodes()), this is
+  // safe to reuse across iterations.
+  dep_graph_ = initial_dep_graph_;
+  // Flush the per-iteration dependency-resolution state back to its initial
+  // (read-only) values.
+  remaining_dep_count_ = initial_dep_count_;
+  dep_resolved_nodes_[CPU_QUEUE] = {};
+  dep_resolved_nodes_[GPU_QUEUE] = {};
+  for (const auto& [node_id, node] : dep_graph_) {
+    if (remaining_dep_count_[node_id] == 0) {
+      if (node->is_cpu_op()) {
+        dep_resolved_nodes_[CPU_QUEUE].push(node);
+      } else {
+        dep_resolved_nodes_[GPU_QUEUE].push(node);
+      }
+    }
+  }
+  // Note: et_complete_ intentionally left untouched. It reflects whether the
+  // underlying trace file stream has been fully consumed, which is a
+  // property of the file, not of a single iteration, and must not be reset.
 }
 
 bool ETFeeder::hasNodesToIssue() {
@@ -74,19 +103,21 @@ shared_ptr<ETFeederNode> ETFeeder::lookupNode(uint64_t node_id) {
 }
 
 void ETFeeder::freeChildrenNodes(uint64_t node_id) {
+  // NOTE: This intentionally does NOT mutate any ETFeederNode/proto state
+  // (e.g. via mutable_data_deps()->erase(...)). Those objects are shared
+  // between initial_dep_graph_ and dep_graph_ (a shallow map copy), so
+  // mutating them would permanently corrupt the read-only initial graph and
+  // break subsequent iterations. Instead, track remaining dependency counts
+  // in a separate per-iteration map that gets reset in resetIteration().
   shared_ptr<ETFeederNode> node = dep_graph_[node_id];
   for (auto child : node->getChildren()) {
-    auto child_chakra = child->getChakraNode();
-    for (auto it = child_chakra->mutable_data_deps()->begin();
-         it != child_chakra->mutable_data_deps()->end();
-         ++it) {
-      if (*it == node_id) {
-        child_chakra->mutable_data_deps()->erase(it);
-        break;
-      }
+    auto child_node_id = child->id();
+    auto count_it = remaining_dep_count_.find(child_node_id);
+    if (count_it == remaining_dep_count_.end() || count_it->second == 0) {
+      continue;
     }
-    if (child_chakra->data_deps().size() == 0) {
-      auto child_node_id = child->id();
+    --(count_it->second);
+    if (count_it->second == 0) {
       DepQueue child_queue_idx = UNKNOWN_VALUE;
       if (child->is_cpu_op()) {
         child_queue_idx = CPU_QUEUE;
