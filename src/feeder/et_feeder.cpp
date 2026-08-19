@@ -1,6 +1,7 @@
 #include "et_feeder.h"
 
 #include <iostream>
+#include <limits>
 
 using namespace std;
 using namespace Chakra;
@@ -10,10 +11,10 @@ ETFeeder::ETFeeder(string filename)
   if (!trace_.is_open()) { // Assuming a method to check if file is open
     throw std::runtime_error("Failed to open trace file: " + filename);
   }
-  dep_resolved_nodes_[CPU_QUEUE] = {};
-  dep_resolved_nodes_[GPU_QUEUE] = {};
-  initial_dep_resolved_nodes_[CPU_QUEUE] = {};
-  initial_dep_resolved_nodes_[GPU_QUEUE] = {};
+  // dep_resolved_nodes_[CPU_QUEUE] = {};
+  // dep_resolved_nodes_[GPU_QUEUE] = {};
+  // initial_dep_resolved_nodes_[CPU_QUEUE] = {};
+  // initial_dep_resolved_nodes_[GPU_QUEUE] = {};
 
   try {
     readGlobalMetadata();
@@ -29,13 +30,21 @@ ETFeeder::~ETFeeder() {}
 
 void ETFeeder::addNode(shared_ptr<ETFeederNode> node) {
   auto node_id = node->getChakraNode()->id();
+  DepQueue queue_idx = node->tid();
+  seen_tids_.insert(queue_idx);
   dep_graph_[node_id] = node;
   uint32_t num_deps = node->getChakraNode()->data_deps().size();
   initial_dep_count_[node_id] = num_deps;
   remaining_dep_count_[node_id] = num_deps;
   if (num_deps == 0){
     // std::cout << "Adding node " << node_id << " as a parentless node " << std::endl;
-    DepQueue queue_idx = node->is_cpu_op() ? CPU_QUEUE : GPU_QUEUE;
+    // DepQueue queue_idx = node->is_cpu_op() ? CPU_QUEUE : GPU_QUEUE;
+    if (dep_resolved_nodes_.find(queue_idx) == dep_resolved_nodes_.end()) {
+      dep_resolved_nodes_[queue_idx] = std::queue<std::shared_ptr<ETFeederNode>>();
+    }
+    if (initial_dep_resolved_nodes_.find(queue_idx) == initial_dep_resolved_nodes_.end()) {
+      initial_dep_resolved_nodes_[queue_idx] = std::queue<std::shared_ptr<ETFeederNode>>();
+    }
     dep_resolved_nodes_[queue_idx].push(node);
     // Also record this node in the read-only snapshot of initially
     // dep-free nodes, so resetIteration() can restore dep_resolved_nodes_
@@ -71,7 +80,15 @@ void ETFeeder::resetIteration() {
 }
 
 bool ETFeeder::hasNodesToIssue() {
-  return !(dep_graph_.empty() && dep_resolved_nodes_[CPU_QUEUE].empty() && dep_resolved_nodes_[GPU_QUEUE].empty());
+  if (!dep_graph_.empty()) {
+    return true;
+  }
+  for (const auto& pair : dep_resolved_nodes_) {
+    if (!pair.second.empty()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 shared_ptr<ETFeederNode> ETFeeder::getNextIssuableNode(DepQueue which_queue) {
@@ -79,8 +96,8 @@ shared_ptr<ETFeederNode> ETFeeder::getNextIssuableNode(DepQueue which_queue) {
     auto old_size = dep_resolved_nodes_[which_queue].size();
     shared_ptr<ETFeederNode> node = dep_resolved_nodes_[which_queue].front();
     dep_resolved_nodes_[which_queue].pop();
-    auto popped_node_id = node->id();
-    auto new_size = dep_resolved_nodes_[which_queue].size();
+    // auto popped_node_id = node->id();
+    // auto new_size = dep_resolved_nodes_[which_queue].size();
     // std::cout << "Pop node " << node->id() << " from " << which_queue << " queue. Old size: " << old_size << ", New size: " << new_size << std::endl;
     return node;
   } else {
@@ -114,15 +131,14 @@ void ETFeeder::freeChildrenNodes(uint64_t node_id) {
     }
     --(count_it->second);
     if (count_it->second == 0) {
-      DepQueue child_queue_idx = UNKNOWN_VALUE;
-      if (child->is_cpu_op()) {
-        child_queue_idx = CPU_QUEUE;
-      } else {
-        child_queue_idx = GPU_QUEUE;
-      }
+      DepQueue child_queue_idx = child->tid();
       dep_resolved_nodes_[child_queue_idx].push(child);
     }
   }
+}
+
+const unordered_set<DepQueue>& ETFeeder::getSeenTids() const {
+  return seen_tids_;
 }
 
 void ETFeeder::readGlobalMetadata() {
