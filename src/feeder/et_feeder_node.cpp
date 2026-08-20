@@ -144,6 +144,14 @@ uint32_t ETFeederNode::comm_tag() {
 }
 
 int64_t ETFeederNode::tid() {
+  // This is a temporary, hardcoded fix. Collective overlapping is not a good idea, since it will change the collective pointer in AstraGenieNetwork. 
+  // Therefore, force all collective ops into one big queue. 29 is the tid for RS for one specific workload, 25 is that of AG. 
+  if (tid_ == 29){
+    return 25;
+  }
+  if (tid_ == 32) {
+    return 28;
+  }
   return tid_;
 }
 
