@@ -46,7 +46,8 @@ class KinetoOperator:
         self.timestamp: int = kineto_op.get("ts", 0)
         self.external_id: int = int(kineto_op.get("args", {}).get("External id", -1))
         self.ev_idx: int = int(kineto_op.get("args", {}).get("Ev Idx", -1))
-        self.tid: int = kineto_op.get("tid", 0)
+        self.kineto_tid: int = kineto_op.get("tid", 0)
+        self.tid: int = self.kineto_tid
         self.host_op: Optional[PyTorchOperator] = None
         self.parent_host_op_id: Optional[int] = None
         self.inter_thread_dep: Optional[int] = None

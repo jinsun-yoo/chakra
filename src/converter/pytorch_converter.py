@@ -321,13 +321,15 @@ class PyTorchConverter:
         protobuf_node.outputs.values = str(json_node.outputs["values"])
         protobuf_node.outputs.shapes = str(json_node.outputs["shapes"])
         protobuf_node.outputs.types = str(json_node.outputs["types"])
+        if not hasattr(json_node, "tid"):
+            raise ValueError(f"Node {json_node.id} is missing its tid queue identifier")
         protobuf_node.attr.extend(
             [
                 ChakraAttr(name="rf_id", int64_val=json_node.rf_id),
                 ChakraAttr(name="fw_parent", int64_val=json_node.fw_parent),
                 ChakraAttr(name="seq_id", int64_val=json_node.seq_id),
                 ChakraAttr(name="scope", int64_val=json_node.scope),
-                ChakraAttr(name="tid", int64_val=json_node.tid),
+                ChakraAttr(name="tid", int64_val=int(json_node.tid)),
                 ChakraAttr(name="fw_tid", int64_val=json_node.fw_tid),
                 ChakraAttr(name="op_schema", string_val=json_node.op_schema),
                 ChakraAttr(name="is_cpu_op", bool_val=not json_node.is_gpu_op()),

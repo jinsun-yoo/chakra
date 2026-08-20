@@ -1018,6 +1018,7 @@ class TraceLinker:
             host_op_id_to_exclusive_dur_map,
             host_op_id_to_timestamp_map,
             host_op_id_to_inter_thread_dep_map,
+            host_op_id_to_kineto_tid_map,
         ) = self.map_host_to_device_ops(
             host_ops,
             kineto_cpu_ops,
@@ -1035,6 +1036,7 @@ class TraceLinker:
             host_op_id_to_exclusive_dur_map,
             host_op_id_to_timestamp_map,
             host_op_id_to_inter_thread_dep_map,
+            host_op_id_to_kineto_tid_map,
         )
         logging.debug("Traces have been successfully linked.")
         return chakra_execution_trace_plus_data
@@ -1083,6 +1085,7 @@ class TraceLinker:
             thread_annotation_op = KinetoOperator(
                 {
                     "name": EXECUTION_TRACE_THREAD_ANNOTATION,
+                    "tid": tid,
                     "ts": start_ts,
                     "inclusive_dur": inclusive_dur,
                     # Exclusive duration is set to zero in the final annotation. This is to avoid constraining
@@ -1125,6 +1128,7 @@ class TraceLinker:
         Dict[int, int],
         Dict[int, int],
         Dict[int, int],
+        Dict[int, int],
     ]:
         """Map Chakra host operators to corresponding device operators."""
         logging.debug("Mapping Charka host operators to corresponding device operators.")
@@ -1137,6 +1141,7 @@ class TraceLinker:
         host_op_id_to_exclusive_dur_map = {}
         host_op_id_to_timestamp_map = {}
         host_op_id_to_inter_thread_dep_map = {}
+        host_op_id_to_kineto_tid_map = {}
 
         for _, host_op in enumerate(host_ops):
             if (host_op.rf_id is not None) and (host_op.rf_id in kineto_rf_id_to_device_op_map):
@@ -1160,6 +1165,7 @@ class TraceLinker:
                     kineto_rf_id_to_device_op_map,
                     kineto_external_id_to_kineto_op_map,
                 )
+                host_op_id_to_kineto_tid_map[host_op.id] = kineto_op.kineto_tid
 
         logging.debug("Completed mapping of Chakra host operators to Kineto operators.")
         return (
@@ -1168,6 +1174,7 @@ class TraceLinker:
             host_op_id_to_exclusive_dur_map,
             host_op_id_to_timestamp_map,
             host_op_id_to_inter_thread_dep_map,
+            host_op_id_to_kineto_tid_map,
         )
 
     def group_gpu_ops_by_cpu_launchers(
@@ -1406,6 +1413,7 @@ class TraceLinker:
         host_op_id_to_exclusive_dur_map: Dict[int, int],
         host_op_id_to_timestamp_map: Dict[int, int],
         host_op_id_to_inter_thread_dep_map: Dict[int, int],
+        host_op_id_to_kineto_tid_map: Dict[int, int],
     ) -> Dict:
         """
         Construct the enhanced Chakra Host Execution Trace (ET+) data structure.
@@ -1440,6 +1448,7 @@ class TraceLinker:
                 host_op_id_to_exclusive_dur_map,
                 host_op_id_to_timestamp_map,
                 host_op_id_to_inter_thread_dep_map,
+                host_op_id_to_kineto_tid_map,
             )
         pytorch_et_data["nodes"] += gpu_ops
 
@@ -1472,6 +1481,7 @@ class TraceLinker:
         host_op_id_to_exclusive_dur_map: Dict[int, int],
         host_op_id_to_timestamp_map: Dict[int, int],
         host_op_id_to_inter_thread_dep_map: Dict[int, int],
+        host_op_id_to_kineto_tid_map: Dict[int, int],
     ) -> List[Dict]:
         """
         Process a single operator in the Chakra host trace, assign a unique ID, and process any dependent operators.
@@ -1498,6 +1508,7 @@ class TraceLinker:
             op["inclusive_dur"] = host_op_id_to_inclusive_dur_map[orig_op_id]
             op["exclusive_dur"] = host_op_id_to_exclusive_dur_map[orig_op_id]
             op["ts"] = host_op_id_to_timestamp_map[orig_op_id]
+            self.set_tid(op, host_op_id_to_kineto_tid_map[orig_op_id])
             if orig_op_id in host_op_id_to_inter_thread_dep_map:
                 op["inter_thread_dep"] = self.id_assigner.lookup_new_id(host_op_id_to_inter_thread_dep_map[orig_op_id])
             else:
@@ -1509,6 +1520,14 @@ class TraceLinker:
             host_op_id_to_kineto_ops_map.pop(orig_op_id)
             return gpu_ops
         return []
+
+    @staticmethod
+    def set_tid(op: Dict, tid: int) -> None:
+        for attr in op["attrs"]:
+            if attr["name"] == "tid":
+                attr["value"] = tid
+                return
+        raise ValueError(f"Node {op['id']} is missing its tid attribute")
 
     def process_dependent_gpu_ops(
         self, cpu_op: Dict, orig_op_id: int, host_op_id_to_kineto_ops_map: Dict[int, List[KinetoOperator]]
@@ -1563,6 +1582,7 @@ class TraceLinker:
                     ),
                 }
             )
+            self.set_tid(new_gpu_op, gpu_op.kineto_tid)
             updated_gpu_ops.append(new_gpu_op)
 
             for sync_dep in gpu_op.sync_dep:
