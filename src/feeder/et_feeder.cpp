@@ -190,4 +190,10 @@ void ETFeeder::readNextWindow() {
     ++num_read;
 
   } while ((num_read < window_size_));
+
+  if (num_read == window_size_) {
+    throw runtime_error(
+        "Execution trace reached ETFeeder window_size; the workload must fit "
+        "within one window.");
+  }
 }
