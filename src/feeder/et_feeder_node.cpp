@@ -34,6 +34,8 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
       this->comm_tag_ = static_cast<uint32_t>(attr.int32_val());
     } else if (attr_name == "tid") {
       this->tid_ = static_cast<int64_t>(attr.int64_val());
+    } else if (attr_name == "stream") {
+      this->stream_ = static_cast<int64_t>(attr.int64_val());
     } else if (attr_name == "pg_name") {
       this->pg_name_ = static_cast<string>(attr.string_val());
     } else if (attr_name == "rf_id") {
@@ -155,6 +157,10 @@ int64_t ETFeederNode::tid() {
     return 28;
   }
   return tid_;
+}
+
+int64_t ETFeederNode::stream() {
+  return stream_;
 }
 
 int64_t ETFeederNode::rf_id() {

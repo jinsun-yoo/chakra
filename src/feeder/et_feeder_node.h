@@ -39,6 +39,7 @@ class ETFeederNode {
   uint32_t comm_dst();
   uint32_t comm_tag();
   int64_t tid();
+  int64_t stream();
   std::string pg_name();
   int64_t rf_id();
 
@@ -69,6 +70,7 @@ class ETFeederNode {
   uint32_t comm_dst_;
   uint32_t comm_tag_;
   int64_t tid_ = 0;
+  int64_t stream_ = -1;
   int64_t rf_id_ = 0;
   std::string pg_name_;
 };
