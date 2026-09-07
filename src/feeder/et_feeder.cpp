@@ -30,8 +30,8 @@ ETFeeder::~ETFeeder() {}
 
 void ETFeeder::addNode(shared_ptr<ETFeederNode> node) {
   auto node_id = node->getChakraNode()->id();
-  DepQueue queue_idx = node->tid();
-  seen_tids_.insert(queue_idx);
+  DepQueue queue_idx = node->schedule_queue_id();
+  seen_schedule_queue_ids_.insert(queue_idx);
   dep_graph_[node_id] = node;
   uint32_t num_deps = node->getChakraNode()->data_deps().size();
   initial_dep_count_[node_id] = num_deps;
@@ -131,14 +131,14 @@ void ETFeeder::freeChildrenNodes(uint64_t node_id) {
     }
     --(count_it->second);
     if (count_it->second == 0) {
-      DepQueue child_queue_idx = child->tid();
+      DepQueue child_queue_idx = child->schedule_queue_id();
       dep_resolved_nodes_[child_queue_idx].push(child);
     }
   }
 }
 
-const unordered_set<DepQueue>& ETFeeder::getSeenTids() const {
-  return seen_tids_;
+const unordered_set<DepQueue>& ETFeeder::getSeenScheduleQueueIds() const {
+  return seen_schedule_queue_ids_;
 }
 
 void ETFeeder::readGlobalMetadata() {

@@ -9,6 +9,9 @@
 
 namespace Chakra {
 
+using DepQueue = int64_t;
+constexpr DepQueue CPU_QUEUE = 1;
+
 class ETFeederNode {
  public:
   ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node);
@@ -40,6 +43,7 @@ class ETFeederNode {
   uint32_t comm_tag();
   int64_t tid();
   int64_t stream();
+  DepQueue schedule_queue_id();
   std::string pg_name();
   int64_t rf_id();
 
@@ -71,6 +75,7 @@ class ETFeederNode {
   uint32_t comm_tag_;
   int64_t tid_ = 0;
   int64_t stream_ = -1;
+  DepQueue schedule_queue_id_ = CPU_QUEUE;
   int64_t rf_id_ = 0;
   std::string pg_name_;
 };

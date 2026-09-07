@@ -44,6 +44,7 @@ ETFeederNode::ETFeederNode(std::shared_ptr<ChakraProtoMsg::Node> node) {
       this->other_attrs_.emplace(attr_name, attr);
     }
   }
+  this->schedule_queue_id_ = this->is_cpu_op_ ? CPU_QUEUE : this->stream_;
 }
 
 shared_ptr<ChakraProtoMsg::Node> ETFeederNode::getChakraNode() {
@@ -161,6 +162,10 @@ int64_t ETFeederNode::tid() {
 
 int64_t ETFeederNode::stream() {
   return stream_;
+}
+
+DepQueue ETFeederNode::schedule_queue_id() {
+  return schedule_queue_id_;
 }
 
 int64_t ETFeederNode::rf_id() {

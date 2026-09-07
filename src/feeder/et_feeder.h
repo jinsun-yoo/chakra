@@ -21,14 +21,6 @@ struct CompareNodes : public std::binary_function<
   }
 };
 
-// enum DepQueue {
-//   UNKNOWN_VALUE,
-//   CPU_QUEUE,
-//   GPU_QUEUE
-// };
-
-using DepQueue = int64_t;
-
 class ETFeeder {
  public:
   ETFeeder(std::string filename);
@@ -41,7 +33,7 @@ class ETFeeder {
   // void pushBackIssuableNode(uint64_t node_id);
   std::shared_ptr<ETFeederNode> lookupNode(uint64_t node_id);
   void freeChildrenNodes(uint64_t node_id);
-  const std::unordered_set<DepQueue>& getSeenTids() const;
+  const std::unordered_set<DepQueue>& getSeenScheduleQueueIds() const;
   void resetIteration();
 
   std::priority_queue<
@@ -74,7 +66,7 @@ class ETFeeder {
   // resetIteration() can restore dep_resolved_nodes_ via direct assignment
   // instead of re-scanning the entire dep_graph_ every iteration.
   std::unordered_map<DepQueue, std::queue<std::shared_ptr<ETFeederNode>>> initial_dep_resolved_nodes_{};
-  std::unordered_set<DepQueue> seen_tids_{};
+  std::unordered_set<DepQueue> seen_schedule_queue_ids_{};
 
   // Read-only per-node count of unresolved data_deps, as seen when the node
   // was first loaded from the trace. Never mutated after being set, so it
