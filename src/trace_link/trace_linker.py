@@ -11,11 +11,10 @@ from et_replay.execution_trace import (
     EXECUTION_TRACE_THREAD_ANNOTATION,
 )
 from et_replay.execution_trace import Node as PyTorchOperator
-from hta.analyzers.critical_path_analysis import CPEdgeType
-from hta.trace_analysis import TraceAnalysis
 
 from .chakra_device_trace_loader import ChakraDeviceTraceLoader
 from .chakra_host_trace_loader import ChakraHostTraceLoader
+from .cpu_launch_segmenter import CpuLaunchSegment, build_cpu_launch_segments
 from .kineto_operator import KinetoOperator
 from .unique_id_assigner import UniqueIdAssigner
 
@@ -46,8 +45,6 @@ class TraceLinker:
             chakra_device_trace (str): Path to the Kineto trace file.
             output_file (str): Path for the output nyTorch execution trace plus file.
         """
-        host_ops = self.chakra_host_trace_loader.load(chakra_host_trace)
-
         (
             kineto_cpu_ops,
             kineto_tid_ops_map,
@@ -63,32 +60,26 @@ class TraceLinker:
             sorted_kineto_cpu_ops,
             sorted_kineto_cpu_op_ts,
             kineto_external_id_to_kineto_op_map,
+            kineto_tid_launch_ops_map,
         ) = self.chakra_device_trace_loader.load(chakra_device_trace)
 
         kineto_tid_cpu_ops_map = self.enforce_inter_thread_order(kineto_tid_cpu_ops_map)
 
-        sync_deps = self.load_sync_dependencies(rank, chakra_device_trace)
-        self.enforce_sync_dep(
-            kineto_external_id_to_kineto_op_map,
-            sorted_kineto_cpu_ops,
-            sorted_kineto_cpu_op_ts,
-            kineto_tid_ops_map,
-            sync_deps,
-        )
-
-        chakra_execution_trace_plus_data = self.link_traces(
-            chakra_host_trace,
-            host_ops,
-            kineto_cpu_ops,
-            sorted_kineto_cpu_ops,
-            sorted_kineto_cpu_op_ts,
-            kineto_correlation_cuda_runtime_map,
-            kineto_rf_id_to_device_op_map,
+        # We only care about the CPU operator that actually fires a GPU operation (a kernel-launch operator such
+        # as cudaLaunchKernel), and how long the CPU spent between two such firings. Segment the CPU timeline at
+        # kernel-launch boundaries instead of emitting one Chakra CPU node per Kineto CPU op. All threads are
+        # merged into a single logical timeline before segmenting (there is no genuine cross-thread concurrency
+        # to model for a single forward/backward pass), so there is exactly one CPU node between each two
+        # sequential kernel-launch operators, globally.
+        segments_by_tid = build_cpu_launch_segments(
+            kineto_tid_cpu_ops_map,
+            kineto_tid_launch_ops_map,
             kineto_gpu_ops,
             kineto_thread_debug,
-            kineto_process_start_time,
-            kineto_process_end_time,
-            kineto_external_id_to_kineto_op_map,
+        )
+
+        chakra_execution_trace_plus_data = self.construct_et_plus_data_from_segments(
+            chakra_host_trace, segments_by_tid
         )
 
         for node in chakra_execution_trace_plus_data["nodes"]:
@@ -104,6 +95,202 @@ class TraceLinker:
                     )
 
         self.dump_chakra_execution_trace_plus(chakra_execution_trace_plus_data, output_file)
+
+    def construct_et_plus_data_from_segments(
+        self,
+        chakra_host_trace: str,
+        segments_by_tid: Dict[int, List[CpuLaunchSegment]],
+    ) -> Dict:
+        """
+        Construct the enhanced Chakra Host Execution Trace (ET+) data structure from CPU launch segments.
+
+        Unlike the original ET+ construction, which enriches every node of the fully nested PyTorch host
+        execution trace with Kineto timing data, this method keeps the original host trace nodes untouched (so
+        nodes such as the process/thread annotations and communication-group metadata nodes, e.g.
+        "## process_group:init ##", are preserved as-is) but does **not** give the original deeply nested
+        aten call-stack nodes any timing data. Instead, across the merged CPU timeline (all original threads
+        combined, see `cpu_launch_segmenter.build_cpu_launch_segments`), it appends one new synthetic CPU node
+        per `CpuLaunchSegment` -- i.e. one CPU node between each two sequential kernel-launch operators -- carrying the segment's name and duration, chained in execution order. Each
+        GPU operator is attached as a dependent of the segment whose bounding kernel-launch operator fired it.
+
+        Args:
+            chakra_host_trace (str): Path to the Chakra host execution trace file.
+            segments_by_tid (Dict[int, List[CpuLaunchSegment]]): CPU launch segments grouped by thread ID, as
+                produced by `build_cpu_launch_segments`.
+
+        Returns:
+            Dict: The constructed ET+ data.
+        """
+        logging.debug("Constructing ET+ data from CPU launch segments.")
+        with open(chakra_host_trace, "r") as file:
+            pytorch_et_data = json.load(file)
+
+        existing_ids = [node["id"] for node in pytorch_et_data["nodes"]]
+        # Seed the ID assigner above every existing host trace node ID so newly synthesized nodes never collide
+        # with the untouched original nodes.
+        self.id_assigner.next_id = max(existing_ids) + 1
+
+        process_anchor_id = self.find_process_anchor_id(pytorch_et_data["nodes"])
+
+        new_nodes = []
+        for tid, segments in segments_by_tid.items():
+            if not segments:
+                continue
+
+            # Kineto thread IDs (OS thread IDs) live in a different ID namespace than the host execution trace's
+            # own "tid" attribute (a small per-process PyTorch thread index), so an existing host trace node
+            # cannot be reused as the anchor for a given Kineto tid's segment chain. Instead, create a new
+            # thread-annotation node per Kineto tid: its name matches the existing thread-annotation nodes, so
+            # `PyTorchConverter.is_root_node` recognizes it as an independent traversal root, exactly like the
+            # real per-thread root nodes already in the host trace.
+            anchor_node = self.new_thread_anchor_node(tid, process_anchor_id)
+            new_nodes.append(anchor_node)
+            prev_node_id = anchor_node["id"]
+
+            for segment in segments:
+                segment_node = self.segment_to_node(segment, prev_node_id)
+                new_nodes.append(segment_node)
+                prev_node_id = segment_node["id"]
+
+                for gpu_op in segment.gpu_ops:
+                    new_nodes.append(self.gpu_op_to_node(gpu_op, segment_node))
+
+        pytorch_et_data["nodes"] += new_nodes
+
+        logging.debug(
+            f"Constructed ET+ data with {len(new_nodes)} new nodes from "
+            f"{sum(len(segments) for segments in segments_by_tid.values())} CPU launch segments."
+        )
+        return pytorch_et_data
+
+    def find_process_anchor_id(self, nodes: List[Dict]) -> int:
+        """
+        Find the host trace node ID of the (single) process-annotation node.
+
+        New synthetic per-Kineto-tid thread-annotation nodes are parented under this node, mirroring how the
+        real thread-annotation nodes are parented in the original host execution trace.
+
+        Args:
+            nodes (List[Dict]): The original host execution trace nodes.
+
+        Returns:
+            int: The host trace node ID of the process-annotation node. Falls back to the smallest existing node
+                ID if no process-annotation node is found (should not normally happen).
+        """
+        for node in nodes:
+            if node.get("name") == EXECUTION_TRACE_PROCESS_ANNOTATION:
+                return node["id"]
+        logging.warning(
+            f"No '{EXECUTION_TRACE_PROCESS_ANNOTATION}' node found in the host execution trace. Falling back to "
+            "the smallest existing node ID as the anchor for new thread-annotation nodes."
+        )
+        return min(node["id"] for node in nodes)
+
+    def new_thread_anchor_node(self, tid: int, parent_id: int) -> Dict:
+        """
+        Create a new thread-annotation node anchoring a chain of CPU launch segments.
+
+        Its name matches the real thread-annotation nodes already present in the host execution trace
+        (`EXECUTION_TRACE_THREAD_ANNOTATION`), so `PyTorchConverter.is_root_node` recognizes it as an independent
+        traversal root and processes these CPU launch segments as their own ordered chain, exactly as the real
+        per-thread root nodes are already handled for the original, untouched host-trace nodes. Since all
+        threads are merged into a single logical timeline before segmenting, there is only ever one such anchor
+        node (`tid` is `cpu_launch_segmenter.MERGED_TID`), rather than one per original Kineto thread ID.
+
+        Args:
+            tid (int): Identifier for this anchor's segment chain (`cpu_launch_segmenter.MERGED_TID`).
+            parent_id (int): The node ID of the host trace's process-annotation node.
+
+        Returns:
+            Dict: A node dict compatible with the Chakra host execution trace JSON schema.
+        """
+        node_id = self.id_assigner.generate_new_id()
+        return {
+            "id": node_id,
+            "name": EXECUTION_TRACE_THREAD_ANNOTATION,
+            "ctrl_deps": parent_id,
+            "inputs": {"values": [], "shapes": [], "types": [], "strides": []},
+            "outputs": {"values": [], "shapes": [], "types": [], "strides": []},
+            "attrs": self._new_node_attrs(tid),
+        }
+
+    @staticmethod
+    def _new_node_attrs(tid: int) -> List[Dict]:
+        """Build the minimal "attrs" list required by the Chakra converter for a synthetic node."""
+        return [
+            {"name": "rf_id", "type": "uint64", "value": 0},
+            {"name": "fw_parent", "type": "uint64", "value": 0},
+            {"name": "seq_id", "type": "int64", "value": -1},
+            {"name": "scope", "type": "uint64", "value": 0},
+            {"name": "tid", "type": "uint64", "value": tid},
+            {"name": "fw_tid", "type": "uint64", "value": 0},
+            {"name": "op_schema", "type": "string", "value": ""},
+        ]
+
+    def segment_to_node(self, segment: CpuLaunchSegment, ctrl_dep: int) -> Dict:
+        """
+        Convert a `CpuLaunchSegment` into a Chakra host trace CPU node dict.
+
+        Args:
+            segment (CpuLaunchSegment): The CPU launch segment to convert.
+            ctrl_dep (int): The node ID of the preceding node in execution order on this thread (either the
+                previous segment, or the thread's anchor node for the first segment).
+
+        Returns:
+            Dict: A node dict compatible with the Chakra host execution trace JSON schema.
+        """
+        node_id = self.id_assigner.generate_new_id()
+        return {
+            "id": node_id,
+            "name": segment.name,
+            "ctrl_deps": ctrl_dep,
+            "inputs": {"values": [], "shapes": [], "types": [], "strides": []},
+            "outputs": {"values": [], "shapes": [], "types": [], "strides": []},
+            "attrs": self._new_node_attrs(segment.tid),
+            "ts": segment.start_ts,
+            "inclusive_dur": segment.duration,
+            "exclusive_dur": segment.duration,
+        }
+
+    def gpu_op_to_node(self, gpu_op: KinetoOperator, segment_node: Dict) -> Dict:
+        """
+        Convert a Kineto GPU operator into a Chakra host trace GPU node dict, dependent on `segment_node`.
+
+        Args:
+            gpu_op (KinetoOperator): The GPU-side Kineto operator (kernel/gpu_memcpy).
+            segment_node (Dict): The CPU launch segment node this GPU operator depends on, i.e. the node
+                representing the kernel-launch operator that fired it.
+
+        Returns:
+            Dict: A node dict compatible with the Chakra host execution trace JSON schema.
+        """
+        node_id = self.id_assigner.generate_new_id()
+        gpu_node = copy.deepcopy(segment_node)
+        gpu_node.update(
+            {
+                "id": node_id,
+                "ctrl_deps": segment_node["id"],
+                "name": gpu_op.name,
+                "cat": gpu_op.category,
+                "ph": gpu_op.phase,
+                "ts": gpu_op.timestamp,
+                "inclusive_dur": gpu_op.inclusive_dur,
+                "exclusive_dur": gpu_op.exclusive_dur,
+                "stream": gpu_op.stream,
+                **({"pg_name": gpu_op.pg_name} if gpu_op.is_inter_gpu_comms_op() and gpu_op.pg_name is not None else {}),
+                **(
+                    {"dst_rank": gpu_op.dst_rank}
+                    if "ncclDevKernel_SendRecv" in gpu_op.name and getattr(gpu_op, "dst_rank", None) is not None
+                    else {}
+                ),
+                **(
+                    {"src_rank": gpu_op.src_rank}
+                    if "ncclDevKernel_SendRecv" in gpu_op.name and getattr(gpu_op, "src_rank", None) is not None
+                    else {}
+                ),
+            }
+        )
+        return gpu_node
 
     def load_sync_dependencies(
         self, rank: int, kineto_file: str, annotation: str = "ProfilerStep", instance_id: int = 0
@@ -126,6 +313,11 @@ class TraceLinker:
             Dict[int, List[int]]: A dictionary mapping end event's external ID to a list of start event's external IDs
                 that have synchronization dependencies.
         """
+        # Imported lazily so that importing this module (and the rest of the trace-linking pipeline) does not
+        # require Holistic Trace Analysis (HTA) to be installed unless this optional feature is actually used.
+        from hta.analyzers.critical_path_analysis import CPEdgeType
+        from hta.trace_analysis import TraceAnalysis
+
         sync_dependencies = {}
         absolute_kineto_file = os.path.abspath(kineto_file)
         trace_dir = os.path.dirname(absolute_kineto_file)
