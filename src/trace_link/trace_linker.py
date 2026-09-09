@@ -35,7 +35,14 @@ class TraceLinker:
         self.chakra_device_trace_loader = ChakraDeviceTraceLoader()
         self.id_assigner = UniqueIdAssigner()
 
-    def link(self, rank: int, chakra_host_trace: str, chakra_device_trace: str, output_file: str) -> None:
+    def link(
+        self,
+        rank: int,
+        chakra_host_trace: str,
+        chakra_device_trace: str,
+        output_file: str,
+        strip_hierarchy: bool = False,
+    ) -> None:
         """
         Links Chakra host execution traces (ET) and Chakra device ET to generate Chakra host + device ET.
 
@@ -44,6 +51,9 @@ class TraceLinker:
             chakra_host_trace (str): Path to the Chakra host execution trace file.
             chakra_device_trace (str): Path to the Kineto trace file.
             output_file (str): Path for the output nyTorch execution trace plus file.
+            strip_hierarchy (bool): If True, drop the original deeply nested host trace nodes from the output,
+                keeping only the synthetic per-thread anchor, CpuLaunchSegment, and GPU nodes. See
+                `construct_et_plus_data_from_segments` for details on why this is safe for comm_size/comm_type.
         """
         (
             kineto_cpu_ops,
@@ -86,7 +96,7 @@ class TraceLinker:
         external_id_to_comm_kineto_op = self.build_external_id_to_comm_kineto_op_map(kineto_cpu_ops)
 
         chakra_execution_trace_plus_data = self.construct_et_plus_data_from_segments(
-            chakra_host_trace, segments_by_tid, external_id_to_comm_kineto_op
+            chakra_host_trace, segments_by_tid, external_id_to_comm_kineto_op, strip_hierarchy
         )
 
         for node in chakra_execution_trace_plus_data["nodes"]:
@@ -155,6 +165,7 @@ class TraceLinker:
         chakra_host_trace: str,
         segments_by_tid: Dict[int, List[CpuLaunchSegment]],
         external_id_to_comm_kineto_op: Dict[int, KinetoOperator],
+        strip_hierarchy: bool = False,
     ) -> Dict:
         """
         Construct the enhanced Chakra Host Execution Trace (ET+) data structure from CPU launch segments.
@@ -162,11 +173,13 @@ class TraceLinker:
         Unlike the original ET+ construction, which enriches every node of the fully nested PyTorch host
         execution trace with Kineto timing data, this method keeps the original host trace nodes untouched (so
         nodes such as the process/thread annotations and communication-group metadata nodes, e.g.
-        "## process_group:init ##", are preserved as-is) but does **not** give the original deeply nested
-        aten call-stack nodes any timing data. Instead, across the merged CPU timeline (all original threads
-        combined, see `cpu_launch_segmenter.build_cpu_launch_segments`), it appends one new synthetic CPU node
-        per `CpuLaunchSegment` -- i.e. one CPU node between each two sequential kernel-launch operators -- carrying the segment's name and duration, chained in execution order. Each
-        GPU operator is attached as a dependent of the segment whose bounding kernel-launch operator fired it.
+        "## process_group:init ##", are preserved as-is, unless `strip_hierarchy` is set) but does **not** give
+        the original deeply nested aten call-stack nodes any timing data. Instead, across the merged CPU
+        timeline (all original threads combined, see `cpu_launch_segmenter.build_cpu_launch_segments`), it
+        appends one new synthetic CPU node per `CpuLaunchSegment` -- i.e. one CPU node between each two
+        sequential kernel-launch operators -- carrying the segment's name and duration, chained in execution
+        order. Each GPU operator is attached as a dependent of the segment whose bounding kernel-launch operator
+        fired it.
 
         Args:
             chakra_host_trace (str): Path to the Chakra host execution trace file.
@@ -175,6 +188,13 @@ class TraceLinker:
             external_id_to_comm_kineto_op (Dict[int, KinetoOperator]): Mapping from external_id to the
                 "record_param_comms" (or best-effort fallback) Kineto CPU operator, as produced by
                 `build_external_id_to_comm_kineto_op_map`.
+            strip_hierarchy (bool): If True, drop the original deeply nested host trace nodes from the output
+                entirely, keeping only the new synthetic per-thread anchor, `CpuLaunchSegment`, and GPU nodes.
+                This is safe with respect to comm_size/comm_type: `gpu_op_to_node` already copies the real
+                tensor list from the matching "record_param_comms" host node onto the GPU node itself before
+                this method returns, so that data is preserved even once the original nodes are dropped. Note
+                that this also drops "process_group:init" metadata nodes; only enable this if your downstream
+                consumer does not depend on them.
 
         Returns:
             Dict: The constructed ET+ data.
@@ -216,7 +236,13 @@ class TraceLinker:
                         self.gpu_op_to_node(gpu_op, segment_node, external_id_to_comm_kineto_op, rf_id_to_host_node)
                     )
 
-        pytorch_et_data["nodes"] += new_nodes
+        if strip_hierarchy:
+            # Drop the original deeply nested host trace nodes entirely, keeping only the synthetic anchor,
+            # segment, and GPU nodes. This is safe because gpu_op_to_node already copied any required
+            # comm_size/comm_type inputs onto the GPU nodes above, before the original nodes are discarded here.
+            pytorch_et_data["nodes"] = new_nodes
+        else:
+            pytorch_et_data["nodes"] += new_nodes
 
         logging.debug(
             f"Constructed ET+ data with {len(new_nodes)} new nodes from "

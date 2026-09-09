@@ -38,13 +38,31 @@ def main() -> None:
         help="Path for the output Chakra host + device trace in the JSON format",
     )
     parser.add_argument("--log-level", default="INFO", type=str, help="Log output verbosity level")
+    parser.add_argument(
+        "--strip-hierarchy",
+        action="store_true",
+        help=(
+            "Drop the original deeply nested PyTorch host trace nodes from the output, keeping only the "
+            "synthetic per-thread anchor, CPU launch segment, and GPU nodes (i.e. one CPU node between each "
+            "two sequential kernel-launch operators, renamed after the enclosing aten/c10d op). comm_size/"
+            "comm_type for collective and send/recv GPU nodes are unaffected, since that data is copied onto "
+            "the GPU nodes before the original nodes are dropped. Note this also drops 'process_group:init' "
+            "metadata nodes."
+        ),
+    )
 
     args = parser.parse_args()
 
     logging.basicConfig(level=args.log_level.upper())
 
     linker = TraceLinker()
-    linker.link(args.rank, args.chakra_host_trace, args.chakra_device_trace, args.output_file)
+    linker.link(
+        args.rank,
+        args.chakra_host_trace,
+        args.chakra_device_trace,
+        args.output_file,
+        strip_hierarchy=args.strip_hierarchy,
+    )
 
     logging.info(f"Linking process successful. Output file is available at {args.output_file}.")
     logging.info("Please run the chakra_converter for further postprocessing.")
