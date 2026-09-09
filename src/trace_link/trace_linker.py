@@ -78,8 +78,15 @@ class TraceLinker:
             kineto_thread_debug,
         )
 
+        # Comm ops (e.g. "record_param_comms") carry the real tensor list (and therefore comm_size/comm_type)
+        # for a collective or send/recv, but that data lives on the Chakra host trace node, not on the GPU
+        # kernel's own Kineto event. Kineto correlates the two via a shared "External id": every op in the
+        # nested CPU call stack that launched a GPU kernel -- including the comm op -- shares that GPU kernel's
+        # external_id. Build external_id -> comm op so gpu_op_to_node can look up the matching host trace node.
+        external_id_to_comm_kineto_op = self.build_external_id_to_comm_kineto_op_map(kineto_cpu_ops)
+
         chakra_execution_trace_plus_data = self.construct_et_plus_data_from_segments(
-            chakra_host_trace, segments_by_tid
+            chakra_host_trace, segments_by_tid, external_id_to_comm_kineto_op
         )
 
         for node in chakra_execution_trace_plus_data["nodes"]:
@@ -96,10 +103,58 @@ class TraceLinker:
 
         self.dump_chakra_execution_trace_plus(chakra_execution_trace_plus_data, output_file)
 
+    def build_external_id_to_comm_kineto_op_map(
+        self, kineto_cpu_ops: List[KinetoOperator]
+    ) -> Dict[int, KinetoOperator]:
+        """
+        Map each communication-launching external_id to its "record_param_comms" Kineto CPU operator.
+
+        "record_param_comms" is the operator PyTorch's profiler inserts around every collective/send/recv call,
+        and it is the one that carries the full tensor list (and therefore the real comm_size) in the Chakra
+        host execution trace. Other CPU ops sharing the same external_id (e.g. the dispatcher-level
+        "c10d::allreduce_") are kept only as a fallback in case "record_param_comms" was not captured.
+
+        Args:
+            kineto_cpu_ops (List[KinetoOperator]): All Kineto CPU/user-annotation operators for this rank.
+
+        Returns:
+            Dict[int, KinetoOperator]: Mapping from external_id to the best-matching comm Kineto CPU operator.
+        """
+        external_id_to_comm_kineto_op: Dict[int, KinetoOperator] = {}
+        for op in kineto_cpu_ops:
+            if op.rf_id is None:
+                continue
+            if op.name == "record_param_comms" or op.external_id not in external_id_to_comm_kineto_op:
+                external_id_to_comm_kineto_op[op.external_id] = op
+        return external_id_to_comm_kineto_op
+
+    def build_rf_id_to_host_node_map(self, nodes: List[Dict]) -> Dict[int, Dict]:
+        """
+        Map each Chakra host trace node's "rf_id" attribute to the node itself.
+
+        "rf_id" (record function id) is the same identifier PyTorch's profiler stamps onto the corresponding
+        Kineto CPU operator, so this map lets a Kineto operator be resolved back to its original, untouched host
+        trace node (and, notably, that node's real tensor "inputs"/"outputs").
+
+        Args:
+            nodes (List[Dict]): The original host execution trace nodes.
+
+        Returns:
+            Dict[int, Dict]: Mapping from rf_id to host trace node.
+        """
+        rf_id_to_host_node = {}
+        for node in nodes:
+            for attr in node.get("attrs", []):
+                if attr.get("name") == "rf_id":
+                    rf_id_to_host_node[attr.get("value")] = node
+                    break
+        return rf_id_to_host_node
+
     def construct_et_plus_data_from_segments(
         self,
         chakra_host_trace: str,
         segments_by_tid: Dict[int, List[CpuLaunchSegment]],
+        external_id_to_comm_kineto_op: Dict[int, KinetoOperator],
     ) -> Dict:
         """
         Construct the enhanced Chakra Host Execution Trace (ET+) data structure from CPU launch segments.
@@ -117,6 +172,9 @@ class TraceLinker:
             chakra_host_trace (str): Path to the Chakra host execution trace file.
             segments_by_tid (Dict[int, List[CpuLaunchSegment]]): CPU launch segments grouped by thread ID, as
                 produced by `build_cpu_launch_segments`.
+            external_id_to_comm_kineto_op (Dict[int, KinetoOperator]): Mapping from external_id to the
+                "record_param_comms" (or best-effort fallback) Kineto CPU operator, as produced by
+                `build_external_id_to_comm_kineto_op_map`.
 
         Returns:
             Dict: The constructed ET+ data.
@@ -131,6 +189,7 @@ class TraceLinker:
         self.id_assigner.next_id = max(existing_ids) + 1
 
         process_anchor_id = self.find_process_anchor_id(pytorch_et_data["nodes"])
+        rf_id_to_host_node = self.build_rf_id_to_host_node_map(pytorch_et_data["nodes"])
 
         new_nodes = []
         for tid, segments in segments_by_tid.items():
@@ -153,7 +212,9 @@ class TraceLinker:
                 prev_node_id = segment_node["id"]
 
                 for gpu_op in segment.gpu_ops:
-                    new_nodes.append(self.gpu_op_to_node(gpu_op, segment_node))
+                    new_nodes.append(
+                        self.gpu_op_to_node(gpu_op, segment_node, external_id_to_comm_kineto_op, rf_id_to_host_node)
+                    )
 
         pytorch_et_data["nodes"] += new_nodes
 
@@ -252,7 +313,13 @@ class TraceLinker:
             "exclusive_dur": segment.duration,
         }
 
-    def gpu_op_to_node(self, gpu_op: KinetoOperator, segment_node: Dict) -> Dict:
+    def gpu_op_to_node(
+        self,
+        gpu_op: KinetoOperator,
+        segment_node: Dict,
+        external_id_to_comm_kineto_op: Dict[int, KinetoOperator],
+        rf_id_to_host_node: Dict[int, Dict],
+    ) -> Dict:
         """
         Convert a Kineto GPU operator into a Chakra host trace GPU node dict, dependent on `segment_node`.
 
@@ -260,6 +327,10 @@ class TraceLinker:
             gpu_op (KinetoOperator): The GPU-side Kineto operator (kernel/gpu_memcpy).
             segment_node (Dict): The CPU launch segment node this GPU operator depends on, i.e. the node
                 representing the kernel-launch operator that fired it.
+            external_id_to_comm_kineto_op (Dict[int, KinetoOperator]): Mapping from external_id to the comm
+                Kineto CPU operator that launched it, as produced by `build_external_id_to_comm_kineto_op_map`.
+            rf_id_to_host_node (Dict[int, Dict]): Mapping from rf_id to host trace node, as produced by
+                `build_rf_id_to_host_node_map`.
 
         Returns:
             Dict: A node dict compatible with the Chakra host execution trace JSON schema.
@@ -290,6 +361,26 @@ class TraceLinker:
                 ),
             }
         )
+
+        if gpu_op.is_inter_gpu_comms_op():
+            comm_kineto_op = external_id_to_comm_kineto_op.get(gpu_op.external_id)
+            comm_host_node = (
+                rf_id_to_host_node.get(comm_kineto_op.rf_id)
+                if comm_kineto_op is not None and comm_kineto_op.rf_id is not None
+                else None
+            )
+            if comm_host_node is not None:
+                # Restore the real tensor list from the comm op's host trace node, so the Chakra converter can
+                # derive comm_size/comm_type for this COMM_COLL_NODE/COMM_SEND_NODE/COMM_RECV_NODE instead of
+                # falling back to this synthetic node's always-empty inputs.
+                gpu_node["inputs"] = comm_host_node["inputs"]
+                gpu_node["outputs"] = comm_host_node["outputs"]
+            else:
+                logging.warning(
+                    f"No comm host trace node found for GPU op '{gpu_op.name}' (external_id="
+                    f"{gpu_op.external_id}). comm_size/comm_type will be missing for this node."
+                )
+
         return gpu_node
 
     def load_sync_dependencies(
