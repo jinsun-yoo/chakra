@@ -42,6 +42,7 @@ class TraceLinker:
         chakra_device_trace: str,
         output_file: str,
         strip_hierarchy: bool = False,
+        sync_dependencies: bool = False,
     ) -> None:
         """
         Links Chakra host execution traces (ET) and Chakra device ET to generate Chakra host + device ET.
@@ -54,6 +55,12 @@ class TraceLinker:
             strip_hierarchy (bool): If True, drop the original deeply nested host trace nodes from the output,
                 keeping only the synthetic per-thread anchor, CpuLaunchSegment, and GPU nodes. See
                 `construct_et_plus_data_from_segments` for details on why this is safe for comm_size/comm_type.
+            sync_dependencies (bool): If True, encode cross-stream synchronization dependencies (e.g. a
+                collective on one CUDA stream waiting on a compute kernel on another stream via
+                cudaStreamWaitEvent) as extra `data_deps` edges between GPU nodes. Requires the device trace to
+                have been captured with PyTorch's `enable_cuda_sync_events` experimental profiler flag; see
+                `load_sync_dependencies_from_cuda_events`. If the device trace lacks "cuda_sync" events, this is
+                a no-op (with a warning logged).
         """
         (
             kineto_cpu_ops,
@@ -72,6 +79,15 @@ class TraceLinker:
             kineto_external_id_to_kineto_op_map,
             kineto_tid_launch_ops_map,
         ) = self.chakra_device_trace_loader.load(chakra_device_trace)
+
+        if sync_dependencies:
+            num_deps = self.load_sync_dependencies_from_cuda_events(chakra_device_trace, kineto_gpu_ops)
+            if not num_deps:
+                logging.warning(
+                    f"--sync-dependencies was requested, but no 'cuda_sync' events were found in "
+                    f"{chakra_device_trace}. The device trace must be captured with PyTorch's "
+                    "enable_cuda_sync_events experimental profiler flag for this feature to have any effect."
+                )
 
         kineto_tid_cpu_ops_map = self.enforce_inter_thread_order(kineto_tid_cpu_ops_map)
 
@@ -211,6 +227,16 @@ class TraceLinker:
         process_anchor_id = self.find_process_anchor_id(pytorch_et_data["nodes"])
         rf_id_to_host_node = self.build_rf_id_to_host_node_map(pytorch_et_data["nodes"])
 
+        # Maps a GPU KinetoOperator to the new Chakra node ID it was emitted as, so that any GPU op referencing
+        # it via `sync_dep` (see `load_sync_dependencies_from_cuda_events`) can resolve it to a concrete node
+        # ID. Populated for every GPU op in a first pass below; `sync_dep` edges are only resolved into node IDs
+        # in a second pass afterwards, since a cross-stream wait's producer kernel is not guaranteed to be
+        # emitted before its consumer in this per-thread-launch-order timeline (e.g. under CUDA graph capture,
+        # where the graph's kernels may be replayed out of the order they were originally captured/launched in).
+        kineto_op_to_new_node_id: Dict[KinetoOperator, int] = {}
+        # (gpu_op, gpu_node) pairs with a pending sync_dep, resolved into node["sync_dep"] in the second pass.
+        pending_sync_deps: List[Tuple[KinetoOperator, Dict]] = []
+
         new_nodes = []
         for tid, segments in segments_by_tid.items():
             if not segments:
@@ -232,9 +258,30 @@ class TraceLinker:
                 prev_node_id = segment_node["id"]
 
                 for gpu_op in segment.gpu_ops:
-                    new_nodes.append(
-                        self.gpu_op_to_node(gpu_op, segment_node, external_id_to_comm_kineto_op, rf_id_to_host_node)
+                    gpu_node = self.gpu_op_to_node(
+                        gpu_op, segment_node, external_id_to_comm_kineto_op, rf_id_to_host_node
                     )
+                    new_nodes.append(gpu_node)
+
+                    if gpu_op.sync_dep:
+                        pending_sync_deps.append((gpu_op, gpu_node))
+
+                    kineto_op_to_new_node_id[gpu_op] = gpu_node["id"]
+
+        for gpu_op, gpu_node in pending_sync_deps:
+            sync_dep_ids = []
+            for producer_op in gpu_op.sync_dep:
+                producer_node_id = kineto_op_to_new_node_id.get(producer_op)
+                if producer_node_id is not None:
+                    sync_dep_ids.append(producer_node_id)
+                else:
+                    logging.warning(
+                        f"Sync dependency producer GPU op '{producer_op.name}' (external_id="
+                        f"{producer_op.external_id}) was never emitted as a Chakra node; skipping this "
+                        f"sync_dep edge for consumer '{gpu_op.name}' (external_id={gpu_op.external_id})."
+                    )
+            if sync_dep_ids:
+                gpu_node["sync_dep"] = sync_dep_ids
 
         if strip_hierarchy:
             # Drop the original deeply nested host trace nodes entirely, keeping only the synthetic anchor,
@@ -408,6 +455,118 @@ class TraceLinker:
                 )
 
         return gpu_node
+
+    def load_sync_dependencies_from_cuda_events(
+        self, chakra_device_trace: str, kineto_gpu_ops: List[KinetoOperator]
+    ) -> int:
+        """
+        Populate cross-stream synchronization dependencies directly from Kineto's "cuda_sync"/"cuda_event"
+        activity categories.
+
+        These categories are only emitted when the trace was captured with PyTorch's
+        `enable_cuda_sync_events` experimental profiler flag (i.e.
+        `torch.profiler.profile(experimental_config=torch._C._profiler._ExperimentalConfig(
+        enable_cuda_sync_events=True))`). When enabled, each "Stream Wait Event" ("cuda_sync") entry directly
+        records the consuming stream (`stream`), `wait_on_stream` (the producer stream), and
+        `wait_on_cuda_event_record_corr_id` (the correlation ID of the CUDA runtime call, e.g. cudaEventRecord,
+        that recorded the CUDA event being waited on); each "cuda_event" entry records the stream a given CUDA
+        event was recorded on. Together these let us deterministically identify, for every stream-to-stream
+        wait, both endpoints of the dependency as actual GPU kernels already present in `kineto_gpu_ops`:
+
+        * the producer: the last GPU op issued on the producer stream at or before the moment its completion was
+          captured by the event record.
+        * the consumer: the first GPU op issued on the consuming stream at or after the wait itself, i.e. the
+          GPU kernel that was actually blocked by the wait.
+
+        This is far more direct than routing through Holistic Trace Analysis's critical path analysis (see
+        `load_sync_dependencies`), which requires this same "cuda_sync" data anyway and is a much heavier,
+        version-fragile dependency (its `critical_path_analysis` was found to crash on newer pandas versions in
+        practice). For each identified dependency, the producer `KinetoOperator` is appended to the consumer
+        `KinetoOperator`'s `sync_dep` list, so that `gpu_op_to_node` can later resolve it to a `sync_dep` edge
+        (a `data_deps` entry, once converted) on the consumer's Chakra node, pointing at the producer's node ID.
+
+        Args:
+            chakra_device_trace (str): Path to the Kineto trace file.
+            kineto_gpu_ops (List[KinetoOperator]): GPU-side Kineto operators already parsed from the same trace.
+                Mutated in place: matched consumer ops get their `sync_dep` list populated with producer ops.
+
+        Returns:
+            int: The number of cross-stream synchronization dependencies found and recorded.
+        """
+        with open(chakra_device_trace, "r") as f:
+            trace_events = json.load(f)["traceEvents"]
+
+        # correlation ID of the CUDA runtime call that recorded a given CUDA event -> (stream, timestamp)
+        event_record_by_corr: Dict[int, Tuple[Optional[int], float]] = {}
+        stream_wait_events: List[Dict] = []
+        for event in trace_events:
+            args = event.get("args", {})
+            if event.get("cat") == "cuda_event":
+                correlation = args.get("correlation")
+                if correlation is not None:
+                    event_record_by_corr[correlation] = (args.get("stream"), event.get("ts"))
+            elif event.get("cat") == "cuda_sync" and args.get("cuda_sync_kind") == "Stream Wait Event":
+                stream_wait_events.append(event)
+
+        # stream -> GPU ops issued on that stream, sorted by timestamp, so that both "the last GPU op issued on
+        # this stream at or before a given timestamp" (producer lookup) and "the first GPU op issued on this
+        # stream at or after a given timestamp" (consumer lookup) can be found via binary search.
+        gpu_ops_by_stream: Dict[int, List[KinetoOperator]] = {}
+        for op in kineto_gpu_ops:
+            if op.stream is not None:
+                gpu_ops_by_stream.setdefault(op.stream, []).append(op)
+        for ops in gpu_ops_by_stream.values():
+            ops.sort(key=lambda op: op.timestamp)
+        gpu_op_ts_by_stream = {stream: [op.timestamp for op in ops] for stream, ops in gpu_ops_by_stream.items()}
+
+        num_deps = 0
+        for wait_event in stream_wait_events:
+            args = wait_event.get("args", {})
+            wait_external_id = args.get("External id")
+            consumer_stream = args.get("stream")
+            wait_ts = wait_event.get("ts")
+            record_corr_id = args.get("wait_on_cuda_event_record_corr_id")
+            if wait_external_id is None or record_corr_id is None or consumer_stream is None or wait_ts is None:
+                continue
+
+            record = event_record_by_corr.get(record_corr_id)
+            if record is None:
+                logging.warning(
+                    f"Stream Wait Event (external_id={wait_external_id}) references cuda event record "
+                    f"correlation {record_corr_id}, but no matching 'cuda_event' entry was found."
+                )
+                continue
+            producer_stream, record_ts = record
+
+            producer_ops = gpu_ops_by_stream.get(producer_stream)
+            producer_op_ts = gpu_op_ts_by_stream.get(producer_stream)
+            if not producer_ops:
+                continue
+            producer_index = bisect.bisect_right(producer_op_ts, record_ts) - 1
+            if producer_index < 0:
+                continue
+            producer_op = producer_ops[producer_index]
+
+            consumer_ops = gpu_ops_by_stream.get(consumer_stream)
+            consumer_op_ts = gpu_op_ts_by_stream.get(consumer_stream)
+            if not consumer_ops:
+                continue
+            consumer_index = bisect.bisect_left(consumer_op_ts, wait_ts)
+            if consumer_index >= len(consumer_ops):
+                continue
+            consumer_op = consumer_ops[consumer_index]
+
+            if consumer_op is producer_op or producer_op in consumer_op.sync_dep:
+                continue
+            consumer_op.sync_dep.append(producer_op)
+            num_deps += 1
+            logging.info(
+                f"Sync dep (from cuda_sync events): producer GPU op '{producer_op.name}' (stream "
+                f"{producer_stream}, external_id {producer_op.external_id}) -> consumer GPU op "
+                f"'{consumer_op.name}' (stream {consumer_stream}, external_id {consumer_op.external_id})"
+            )
+
+        return num_deps
 
     def load_sync_dependencies(
         self, rank: int, kineto_file: str, annotation: str = "ProfilerStep", instance_id: int = 0

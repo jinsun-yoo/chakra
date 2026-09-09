@@ -50,6 +50,19 @@ def main() -> None:
             "metadata nodes."
         ),
     )
+    parser.add_argument(
+        "--sync-dependencies",
+        action="store_true",
+        help=(
+            "Encode cross-stream synchronization dependencies (e.g. a collective on one CUDA stream waiting on "
+            "a compute kernel on another stream via cudaStreamWaitEvent) as extra data_deps edges between GPU "
+            "nodes. Requires the Chakra device trace to have been captured with PyTorch's "
+            "enable_cuda_sync_events experimental profiler flag (torch.profiler.profile(experimental_config="
+            "torch._C._profiler._ExperimentalConfig(enable_cuda_sync_events=True))), which emits 'cuda_sync' "
+            "and 'cuda_event' Kineto activity categories. If these are missing from the device trace, this "
+            "flag is a no-op (a warning is logged)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -62,6 +75,7 @@ def main() -> None:
         args.chakra_device_trace,
         args.output_file,
         strip_hierarchy=args.strip_hierarchy,
+        sync_dependencies=args.sync_dependencies,
     )
 
     logging.info(f"Linking process successful. Output file is available at {args.output_file}.")
