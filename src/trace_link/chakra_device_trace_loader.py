@@ -28,7 +28,6 @@ class ChakraDeviceTraceLoader:
         List[KinetoOperator],
         List[int],
         Dict[int, KinetoOperator],
-        Dict[int, List[KinetoOperator]],
     ]:
         """
         Load and process the Chakra device trace.
@@ -73,7 +72,6 @@ class ChakraDeviceTraceLoader:
             dev_data["sorted_kineto_cpu_ops"],
             dev_data["sorted_kineto_cpu_op_ts"],
             dev_data["kineto_external_id_to_kineto_op_map"],
-            dev_data["kineto_tid_launch_ops_map"],
         )
 
     def construct_dev_data_structures(self, kineto_ops: List[KinetoOperator], trace_file: str) -> Dict:
@@ -103,7 +101,6 @@ class ChakraDeviceTraceLoader:
         kineto_id_arrow_op_map = {}
         kineto_id_cuda_launch_op_map = {}
         kineto_external_id_to_kineto_op_map = {}
-        kineto_tid_launch_ops_map = {}
 
         for op in kineto_ops:
             kineto_tid_ops_map.setdefault(op.tid, []).append(op)
@@ -115,7 +112,6 @@ class ChakraDeviceTraceLoader:
 
             elif op.is_kernel_launch_op():
                 kineto_id_cuda_launch_op_map[op.external_id] = op
-                kineto_tid_launch_ops_map.setdefault(op.tid, []).append(op)
                 if op.correlation in kineto_correlation_cuda_runtime_map:
                     error_msg = (
                         f"Duplicate correlation ID {op.correlation} found in kineto_id_cuda_launch_op_map. "
@@ -176,7 +172,6 @@ class ChakraDeviceTraceLoader:
             "sorted_kineto_cpu_ops": [],
             "sorted_kineto_cpu_op_ts": [],
             "kineto_external_id_to_kineto_op_map": kineto_external_id_to_kineto_op_map,
-            "kineto_tid_launch_ops_map": kineto_tid_launch_ops_map,
         }
 
     def calculate_exclusive_dur(self, kineto_tid_cpu_ops_map: Dict[int, List[KinetoOperator]]) -> None:
