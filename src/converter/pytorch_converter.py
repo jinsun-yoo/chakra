@@ -50,6 +50,8 @@ class PyTorchConverter:
         for root_node in root_node_list:
             self.convert_ctrl_dep_to_data_dep(json_node_map, protobuf_node_map, root_node)
 
+        self.add_same_stream_ordering_dependencies(json_node_map, protobuf_node_map)
+
         protobuf_node_map = self.remove_dangling_nodes(protobuf_node_map)
 
         parent_to_children_map = self.update_parent_to_children_map(protobuf_node_map)
@@ -508,6 +510,69 @@ class PyTorchConverter:
                 child_chakra_node = protobuf_node_map.get(child_chakra_id)
                 if child_chakra_node and child_chakra_node.id not in visited:
                     stack.append(child_chakra_node)
+
+    def add_same_stream_ordering_dependencies(
+        self,
+        json_node_map: Dict[int, PyTorchNode],
+        protobuf_node_map: Dict[int, ChakraNode],
+    ) -> None:
+        """
+        Add data dependencies between consecutive GPU ops issued on the same CUDA stream.
+
+        Real CUDA streams execute kernels strictly in launch (FIFO) order. Without this pass, two GPU ops on the
+        same stream only end up connected in the Chakra data_deps graph if they happen to be adjacent in the
+        ctrl_dep-derived DFS chain (see convert_ctrl_dep_to_data_dep) or are linked by an explicit cross-stream
+        sync_dep -- neither of which is guaranteed for same-stream ops launched from different CPU call sites.
+        Downstream simulators (e.g. astra-sim's ETFeeder/HardwareResource) only serialize a stream's *concurrency*
+        (at most one in-flight op per stream) and dispatch ready nodes in the order their data_deps happen to
+        resolve, not in original launch order. Without an explicit edge, a later-launched op whose dependencies
+        resolve first can be dispatched before an earlier op on the same stream, violating real hardware semantics.
+
+        NOTE (TODO): This is a pragmatic stand-in. We are adding this edge purely because of GPU-stream before/after
+        (launch-order) position, not because we have identified a genuine data/control dependency between the
+        underlying CPU operators that launched these GPU ops. Ideally, this same-stream ordering should instead
+        fall out naturally from correctly modeling the dependency between the *corresponding CPU ops* (e.g. via
+        the CPU-side stream/queue semantics), rather than being bolted on directly at the GPU-op level here. Revisit
+        this once CPU-op-level dependency modeling is rich enough to make this pass unnecessary.
+
+        Args:
+            json_node_map (Dict[int, PyTorchNode]): Dictionary of JSON nodes, used to read `ts` and `stream`.
+            protobuf_node_map (Dict[int, ChakraNode]): Dictionary of protobuf nodes to augment in place.
+        """
+        ops_by_stream: Dict[int, List[Tuple[int, Optional[float]]]] = {}
+        for node_id, chakra_node in protobuf_node_map.items():
+            json_node = json_node_map.get(node_id)
+            if json_node is None or not json_node.is_gpu_op():
+                continue
+            stream = json_node.stream
+            if not stream:
+                # Stream 0 is not a real, dedicated stream in this context (it is the default/unset value for
+                # CPU ops and untagged nodes), so it is not meaningful to serialize "ordering" on it here.
+                continue
+            ops_by_stream.setdefault(stream, []).append((node_id, json_node.ts))
+
+        num_added = 0
+        for stream, ops in ops_by_stream.items():
+            # Node IDs are assigned in chronological recording order, so sorting by ID recovers CPU launch order
+            # for GPU ops issued on the same stream (spot-checked against `ts`: 0 inversions across thousands of
+            # same-stream pairs). Still guard with an explicit `ts` check to protect against the CUDA graph
+            # capture/replay timestamp irregularities identified elsewhere in this converter (see sync_dep
+            # handling above), where node ID order and replay execution order can diverge.
+            ops.sort(key=lambda x: x[0])
+            for (prev_id, prev_ts), (curr_id, curr_ts) in zip(ops, ops[1:]):
+                if prev_ts is not None and curr_ts is not None and curr_ts < prev_ts:
+                    continue
+                curr_node = protobuf_node_map[curr_id]
+                if prev_id not in curr_node.data_deps:
+                    curr_node.data_deps.append(prev_id)
+                    num_added += 1
+                    logging.debug(
+                        f"Node ID {curr_id} now has a same-stream ordering dependency on Node ID {prev_id} "
+                        f"(stream {stream})"
+                    )
+
+        if num_added:
+            logging.debug(f"Added {num_added} same-stream ordering dependencies.")
 
     def remove_dangling_nodes(self, protobuf_node_map: Dict[int, ChakraNode]) -> Dict[int, ChakraNode]:
         """
