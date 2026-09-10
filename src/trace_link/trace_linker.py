@@ -475,8 +475,21 @@ class TraceLinker:
 
         * the producer: the last GPU op issued on the producer stream at or before the moment its completion was
           captured by the event record.
-        * the consumer: the first GPU op issued on the consuming stream at or after the wait itself, i.e. the
-          GPU kernel that was actually blocked by the wait.
+        * the consumer: the GPU op launched by the first kernel-launch CUDA runtime/driver call (e.g.
+          cudaLaunchKernel, cuLaunchKernelEx, cudaMemcpyAsync, ...) issued on the same CPU thread, strictly after
+          the `cudaStreamWaitEvent` call that produced this "Stream Wait Event" entry, whose launched GPU op lands
+          on this wait's own consumer stream. This is a CPU-program-order fact, not a GPU-timestamp guess:
+          PyTorch always issues `cudaStreamWaitEvent(consumer_stream, event)` from the same host thread that will
+          go on to launch the kernel it is meant to gate. We don't just take the very next launch call
+          unconditionally, though: when several stream waits are issued back-to-back on one host thread (e.g. one
+          thread gating streams A, B, C in a row), unrelated launches for other streams can legitimately appear
+          first, so we scan forward for the first launch matching this wait's own consumer stream instead. This
+          replaces an earlier,
+          less reliable approach that bisected the consumer stream's GPU-op timestamps against the "Stream Wait
+          Event" entry's own `ts` (or `max(ts, record_ts)`): that entry's `ts` marks when the wait was merely
+          *enqueued*, not when it actually released, and other GPU ops on the same stream are frequently
+          interleaved in real time between those two moments (observed in ~80% of wait events on one workload),
+          which could make the bisection land on an op that was not actually gated by this wait at all.
 
         This is far more direct than routing through Holistic Trace Analysis's critical path analysis (see
         `load_sync_dependencies`), which requires this same "cuda_sync" data anyway and is a much heavier,
@@ -499,18 +512,58 @@ class TraceLinker:
         # correlation ID of the CUDA runtime call that recorded a given CUDA event -> (stream, timestamp)
         event_record_by_corr: Dict[int, Tuple[Optional[int], float]] = {}
         stream_wait_events: List[Dict] = []
+        # correlation ID of the "cudaStreamWaitEvent" CPU call -> that raw CPU event dict.
+        cpu_wait_event_by_corr: Dict[int, Dict] = {}
+        # (tid) -> list of raw CPU events that either launch a GPU op or are a "cudaStreamWaitEvent" call,
+        # sorted by ts, so that "the first kernel-launch call strictly after a given cudaStreamWaitEvent call
+        # on the same thread" can be found by a simple forward scan from that call's position in the list.
+        launch_and_wait_events_by_tid: Dict[int, List[Dict]] = {}
+        launch_op_names = {
+            "cuLaunchKernel",
+            "cuLaunchKernelEx",
+            "cudaLaunchKernel",
+            "cudaLaunchKernelExC",
+            "cudaLaunchCooperativeKernel",
+            "cudaMemcpy",
+            "cudaMemcpyAsync",
+            "cudaMemcpyFromSymbol",
+            "cudaMemcpyToSymbol",
+            "cudaMemsetAsync",
+            "hipLaunchKernel",
+            "hipExtLaunchKernel",
+            "hipExtModuleLaunchKernel",
+            "hipModuleLaunchKernel",
+            "hipMemcpyWithStream",
+            "hipMemcpyAsync",
+        }
         for event in trace_events:
             args = event.get("args", {})
-            if event.get("cat") == "cuda_event":
+            cat = event.get("cat")
+            if cat == "cuda_event":
                 correlation = args.get("correlation")
                 if correlation is not None:
                     event_record_by_corr[correlation] = (args.get("stream"), event.get("ts"))
-            elif event.get("cat") == "cuda_sync" and args.get("cuda_sync_kind") == "Stream Wait Event":
+            elif cat == "cuda_sync" and args.get("cuda_sync_kind") == "Stream Wait Event":
                 stream_wait_events.append(event)
+            elif cat in ("cuda_runtime", "cuda_driver") and event.get("tid") is not None:
+                if event.get("name") == "cudaStreamWaitEvent":
+                    correlation = args.get("correlation")
+                    if correlation is not None:
+                        cpu_wait_event_by_corr[correlation] = event
+                    launch_and_wait_events_by_tid.setdefault(event["tid"], []).append(event)
+                elif event.get("name") in launch_op_names:
+                    launch_and_wait_events_by_tid.setdefault(event["tid"], []).append(event)
+        for tid_events in launch_and_wait_events_by_tid.values():
+            tid_events.sort(key=lambda e: e.get("ts", 0))
 
-        # stream -> GPU ops issued on that stream, sorted by timestamp, so that both "the last GPU op issued on
-        # this stream at or before a given timestamp" (producer lookup) and "the first GPU op issued on this
-        # stream at or after a given timestamp" (consumer lookup) can be found via binary search.
+        # correlation ID of the CUDA runtime/driver launch call -> the GPU op it launched.
+        gpu_op_by_corr: Dict[int, KinetoOperator] = {}
+        for op in kineto_gpu_ops:
+            if op.correlation is not None and op.correlation >= 0:
+                gpu_op_by_corr[op.correlation] = op
+
+        # stream -> GPU ops issued on that stream, sorted by timestamp, used to find "the last GPU op issued
+        # on this stream at or before a given timestamp" (producer lookup) via binary search.
         gpu_ops_by_stream: Dict[int, List[KinetoOperator]] = {}
         for op in kineto_gpu_ops:
             if op.stream is not None:
@@ -524,9 +577,9 @@ class TraceLinker:
             args = wait_event.get("args", {})
             wait_external_id = args.get("External id")
             consumer_stream = args.get("stream")
-            wait_ts = wait_event.get("ts")
+            wait_corr_id = args.get("correlation")
             record_corr_id = args.get("wait_on_cuda_event_record_corr_id")
-            if wait_external_id is None or record_corr_id is None or consumer_stream is None or wait_ts is None:
+            if wait_external_id is None or record_corr_id is None or consumer_stream is None or wait_corr_id is None:
                 continue
 
             record = event_record_by_corr.get(record_corr_id)
@@ -547,14 +600,40 @@ class TraceLinker:
                 continue
             producer_op = producer_ops[producer_index]
 
-            consumer_ops = gpu_ops_by_stream.get(consumer_stream)
-            consumer_op_ts = gpu_op_ts_by_stream.get(consumer_stream)
-            if not consumer_ops:
+            # Find the CPU-side cudaStreamWaitEvent call for this wait (same correlation ID), then walk
+            # forward in that thread's CPU-program-order event list for the first kernel-launch call whose
+            # GPU op lands on this wait's own consumer stream: that GPU op is the consumer, i.e. the kernel
+            # actually gated by this wait. We cannot simply take the very next launch call unconditionally --
+            # when several stream waits are issued back-to-back on the same host thread (e.g. one thread
+            # gating streams A, B, C in a row), the launches that satisfy each wait are not necessarily
+            # interleaved 1:1 with the waits: unrelated kernel launches for other streams (already-waited-on
+            # or not) can appear first. Scanning for the matching stream (rather than stopping at the first
+            # launch of any kind) reliably finds the correct GPU op in that case.
+            cpu_wait_op = cpu_wait_event_by_corr.get(wait_corr_id)
+            if cpu_wait_op is None:
                 continue
-            consumer_index = bisect.bisect_left(consumer_op_ts, wait_ts)
-            if consumer_index >= len(consumer_ops):
+            tid_events = launch_and_wait_events_by_tid.get(cpu_wait_op["tid"])
+            if not tid_events:
                 continue
-            consumer_op = consumer_ops[consumer_index]
+            wait_index = next((i for i, e in enumerate(tid_events) if e is cpu_wait_op), None)
+            if wait_index is None:
+                continue
+            consumer_op = None
+            for candidate in tid_events[wait_index + 1 :]:
+                if candidate.get("name") == "cudaStreamWaitEvent":
+                    continue
+                launch_corr = candidate.get("args", {}).get("correlation")
+                candidate_op = gpu_op_by_corr.get(launch_corr) if launch_corr is not None else None
+                if candidate_op is not None and candidate_op.stream == consumer_stream:
+                    consumer_op = candidate_op
+                    break
+            if consumer_op is None:
+                logging.warning(
+                    f"Stream Wait Event (external_id={wait_external_id}) expected consumer stream "
+                    f"{consumer_stream}, but no later kernel-launch call on the same host thread launched a GPU "
+                    "op on that stream; skipping."
+                )
+                continue
 
             if consumer_op is producer_op or producer_op in consumer_op.sync_dep:
                 continue
