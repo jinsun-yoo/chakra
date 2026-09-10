@@ -157,14 +157,42 @@ int64_t ETFeederNode::tid() {
   if (tid_ == 32) {
     return 28;
   }
+  if (tid_ == 43) {
+    return 39;
+  }
   return tid_;
 }
 
 int64_t ETFeederNode::stream() {
+  // This is a temporary, hardcoded fix. Collective overlapping is not a good idea, since it will change the
+  // collective pointer in AstraGenieNetwork. Therefore, force all collective ops into one big queue. 29 is the
+  // stream for RS for one specific workload, 25 is that of AG. 43/39 is the same RS/AG pair for other ranks of
+  // that workload. 32/28 is another such pair.
+  if (stream_ == 29) {
+    return 25;
+  }
+  if (stream_ == 32) {
+    return 28;
+  }
+  if (stream_ == 43) {
+    return 39;
+  }
   return stream_;
 }
 
 DepQueue ETFeederNode::schedule_queue_id() {
+  // See the hardcoded remapping comment in stream() above -- schedule_queue_id_ is derived from stream_ at
+  // construction time (see the constructor), before this remapping existed, so it must be re-applied here too
+  // to actually merge these collective ops into one dispatch queue.
+  if (schedule_queue_id_ == 29) {
+    return 25;
+  }
+  if (schedule_queue_id_ == 32) {
+    return 28;
+  }
+  if (schedule_queue_id_ == 43) {
+    return 39;
+  }
   return schedule_queue_id_;
 }
 
