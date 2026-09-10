@@ -558,6 +558,28 @@ class TraceLinker:
 
             if consumer_op is producer_op or producer_op in consumer_op.sync_dep:
                 continue
+
+            # Sanity-check causality: a genuine dependency requires the producer to have finished (its own GPU
+            # execution window ends) at or before the consumer starts. Under CUDA graph capture/replay, the
+            # "cuda_sync"/"cuda_event" timestamps used above to identify *which* kernel is on either end of a
+            # wait do not always line up with that kernel's actual per-replay execution window (the same op may
+            # be replayed multiple times, and event/wait bookkeeping timestamps can reflect a different replay
+            # instance than the GPU kernel timestamps do). When that happens, bisecting on those timestamps can
+            # land on the wrong instance of a repeated kernel, producing a "dependency" that is backwards in time
+            # (producer finishes after consumer already started) -- which is physically impossible for a real
+            # dependency and must not be encoded. Drop those as unresolvable/spurious rather than emit a
+            # contradictory edge.
+            producer_end = producer_op.timestamp + producer_op.inclusive_dur
+            if producer_end > consumer_op.timestamp:
+                logging.warning(
+                    f"Dropping implausible sync dep (from cuda_sync events): producer GPU op '{producer_op.name}' "
+                    f"(stream {producer_stream}, external_id {producer_op.external_id}, ends at {producer_end}) "
+                    f"would finish after consumer GPU op '{consumer_op.name}' (stream {consumer_stream}, "
+                    f"external_id {consumer_op.external_id}, starts at {consumer_op.timestamp}) already started; "
+                    "likely a CUDA graph replay timestamp mismatch."
+                )
+                continue
+
             consumer_op.sync_dep.append(producer_op)
             num_deps += 1
             logging.info(
