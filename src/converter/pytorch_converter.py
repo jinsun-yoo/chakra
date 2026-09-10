@@ -484,10 +484,19 @@ class PyTorchConverter:
             if json_node.sync_dep:
                 for sync_dep in json_node.sync_dep:
                     if sync_dep not in current_node.data_deps:
-                        # Found a bug encoding false dependency HTA.
-                        # Compare start_time to eliminate false sync dependency.
+                        # NOTE: This used to additionally require
+                        # `prior_node.start_time_micros < current_node.start_time_micros` to guard against false
+                        # dependencies from HTA's heuristic (time-window-based) sync dependency matching. However,
+                        # `start_time_micros` is never populated on ChakraNode anywhere in this converter, so it is
+                        # always 0 for every node, which made that comparison (0 < 0) always False -- silently
+                        # dropping every sync dependency regardless of correctness. Additionally, GPU op timestamps
+                        # are not reliably ordered under CUDA graph capture/replay, so a timestamp-based sanity check
+                        # is not a valid correctness signal here anyway. The sync_dep list is now populated directly
+                        # from explicit cuda_sync/cuda_event correlation IDs (see
+                        # TraceLinker.load_sync_dependencies_from_cuda_events), which already guarantees a correct
+                        # producer/consumer pairing, so no additional time-based filtering is needed.
                         prior_node = protobuf_node_map.get(sync_dep)
-                        if prior_node is not None and prior_node.start_time_micros < current_node.start_time_micros:
+                        if prior_node is not None:
                             current_node.data_deps.append(sync_dep)
                             logging.debug(
                                 f"Node ID {current_node.id} now has an synchonization dependency on Node ID "
