@@ -1,5 +1,7 @@
 [build-system]
-requires = [ "setuptools>=61",
+requires = [ 
+  "protobuf==6.33.6",
+  "setuptools>=61",
   "wheel",
   "setuptools-grpc",
   "grpcio-tools"]
