@@ -34,6 +34,10 @@ class ETFeeder {
   std::shared_ptr<ETFeederNode> lookupNode(uint64_t node_id);
   void freeChildrenNodes(uint64_t node_id);
   const std::unordered_set<DepQueue>& getSeenScheduleQueueIds() const;
+  // Every node loaded from the trace (read-only; same objects as the per-iteration graph).
+  const std::unordered_map<uint64_t, std::shared_ptr<ETFeederNode>>& getAllNodes() const {
+    return initial_dep_graph_;
+  }
   void resetIteration();
 
   std::priority_queue<

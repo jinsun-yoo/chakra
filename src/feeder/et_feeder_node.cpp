@@ -1,4 +1,5 @@
 #include "et_feeder_node.h"
+#include <cstdlib>
 
 using namespace std;
 using namespace Chakra;
@@ -148,52 +149,44 @@ uint32_t ETFeederNode::comm_tag() {
   return comm_tag_;
 }
 
-int64_t ETFeederNode::tid() {
-  // This is a temporary, hardcoded fix. Collective overlapping is not a good idea, since it will change the collective pointer in AstraGenieNetwork. 
-  // Therefore, force all collective ops into one big queue. 29 is the tid for RS for one specific workload, 25 is that of AG. 
-  if (tid_ == 29){
+// Legacy workaround: Genie used to support only one in-flight collective per rank, so specific stream ids
+// (RS 29/43/32 -> AG 25/39/28 of one workload) were merged into one dispatch queue. Genie now runs
+// collectives of different communicators concurrently and orders ops of the same communicator itself,
+// so merging is off by default (merging can deadlock that ordering). GENIE_LEGACY_STREAM_MERGE=1 restores it.
+static bool legacy_stream_merge() {
+  static const bool enabled = [] {
+    const char* e = getenv("GENIE_LEGACY_STREAM_MERGE");
+    return e != nullptr && *e != '\0' && *e != '0';
+  }();
+  return enabled;
+}
+
+static int64_t legacy_merged_stream(int64_t s) {
+  if (!legacy_stream_merge()) {
+    return s;
+  }
+  if (s == 29) {
     return 25;
   }
-  if (tid_ == 32) {
+  if (s == 32) {
     return 28;
   }
-  if (tid_ == 43) {
+  if (s == 43) {
     return 39;
   }
-  return tid_;
+  return s;
+}
+
+int64_t ETFeederNode::tid() {
+  return legacy_merged_stream(tid_);
 }
 
 int64_t ETFeederNode::stream() {
-  // This is a temporary, hardcoded fix. Collective overlapping is not a good idea, since it will change the
-  // collective pointer in AstraGenieNetwork. Therefore, force all collective ops into one big queue. 29 is the
-  // stream for RS for one specific workload, 25 is that of AG. 43/39 is the same RS/AG pair for other ranks of
-  // that workload. 32/28 is another such pair.
-  if (stream_ == 29) {
-    return 25;
-  }
-  if (stream_ == 32) {
-    return 28;
-  }
-  if (stream_ == 43) {
-    return 39;
-  }
-  return stream_;
+  return legacy_merged_stream(stream_);
 }
 
 DepQueue ETFeederNode::schedule_queue_id() {
-  // See the hardcoded remapping comment in stream() above -- schedule_queue_id_ is derived from stream_ at
-  // construction time (see the constructor), before this remapping existed, so it must be re-applied here too
-  // to actually merge these collective ops into one dispatch queue.
-  if (schedule_queue_id_ == 29) {
-    return 25;
-  }
-  if (schedule_queue_id_ == 32) {
-    return 28;
-  }
-  if (schedule_queue_id_ == 43) {
-    return 39;
-  }
-  return schedule_queue_id_;
+  return legacy_merged_stream(schedule_queue_id_);
 }
 
 int64_t ETFeederNode::rf_id() {
