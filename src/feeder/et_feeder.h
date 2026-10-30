@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <queue>
 #include <unordered_map>
@@ -23,7 +24,11 @@ struct CompareNodes : public std::binary_function<
 
 class ETFeeder {
  public:
-  ETFeeder(std::string filename);
+  // Optional callback that assigns each node's dispatch queue as it is loaded, before the node is put into
+  // the per-queue ready lists (set_schedule_queue_id). Without it, schedule_queue_id() is used unchanged.
+  using QueueAssigner = std::function<DepQueue(ETFeederNode&)>;
+
+  ETFeeder(std::string filename, QueueAssigner queue_assigner = nullptr);
   ~ETFeeder();
 
   void addNode(std::shared_ptr<ETFeederNode> node);
@@ -50,6 +55,7 @@ class ETFeeder {
   ProtoInputStream trace_;
   const uint32_t window_size_;
   bool et_complete_;
+  QueueAssigner queue_assigner_;
 
   // Read-only, populated once when the trace is first loaded. Never mutated
   // afterwards so it can be reused as the pristine source of truth for every

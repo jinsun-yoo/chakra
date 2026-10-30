@@ -6,8 +6,11 @@
 using namespace std;
 using namespace Chakra;
 
-ETFeeder::ETFeeder(string filename)
-    : trace_(filename), window_size_(4096 * 256), et_complete_(false) {
+ETFeeder::ETFeeder(string filename, QueueAssigner queue_assigner)
+    : trace_(filename),
+      window_size_(4096 * 256),
+      et_complete_(false),
+      queue_assigner_(std::move(queue_assigner)) {
   if (!trace_.is_open()) { // Assuming a method to check if file is open
     throw std::runtime_error("Failed to open trace file: " + filename);
   }
@@ -158,6 +161,9 @@ shared_ptr<ETFeederNode> ETFeeder::readNode() {
     return nullptr;
   }
   shared_ptr<ETFeederNode> node = make_shared<ETFeederNode>(pkt_msg);
+  if (queue_assigner_) {
+    node->set_schedule_queue_id(queue_assigner_(*node));
+  }
 
   bool dep_unresolved = false;
   for (int i = 0; i < pkt_msg->data_deps_size(); ++i) {

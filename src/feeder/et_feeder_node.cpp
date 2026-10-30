@@ -208,7 +208,15 @@ int64_t ETFeederNode::stream() {
   return stream_;
 }
 
+void ETFeederNode::set_schedule_queue_id(DepQueue queue_id) {
+  schedule_queue_id_ = queue_id;
+  schedule_queue_id_overridden_ = true;
+}
+
 DepQueue ETFeederNode::schedule_queue_id() {
+  if (schedule_queue_id_overridden_) {
+    return schedule_queue_id_;
+  }
   // See the hardcoded remapping comment in stream() above -- schedule_queue_id_ is derived from stream_ at
   // construction time (see the constructor), before this remapping existed, so it must be re-applied here too
   // to actually merge these collective ops into one dispatch queue.

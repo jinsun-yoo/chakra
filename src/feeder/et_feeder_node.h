@@ -44,6 +44,9 @@ class ETFeederNode {
   int64_t tid();
   int64_t stream();
   DepQueue schedule_queue_id();
+  // Overrides the dispatch queue (bypasses the hardcoded stream remap). Used by simulators that assign
+  // queues from information the feeder does not have (e.g. ASTRA-sim's scale-out queue).
+  void set_schedule_queue_id(DepQueue queue_id);
   std::string pg_name();
   int64_t rf_id();
 
@@ -76,6 +79,7 @@ class ETFeederNode {
   int64_t tid_ = 0;
   int64_t stream_ = -1;
   DepQueue schedule_queue_id_ = CPU_QUEUE;
+  bool schedule_queue_id_overridden_ = false;
   int64_t rf_id_ = 0;
   std::string pg_name_;
 };
