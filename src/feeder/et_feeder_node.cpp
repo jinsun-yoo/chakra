@@ -160,6 +160,18 @@ int64_t ETFeederNode::tid() {
   if (tid_ == 43) {
     return 39;
   }
+  if (tid_ == 20) {
+    return 16;
+  }
+  if (tid_ == 17) {
+    return 25;
+  }
+  if (tid_ == 19) {
+    return 27;
+  }
+  if (tid_ == 31) {
+    return 23;
+  }
   return tid_;
 }
 
@@ -168,6 +180,10 @@ int64_t ETFeederNode::stream() {
   // collective pointer in AstraGenieNetwork. Therefore, force all collective ops into one big queue. 29 is the
   // stream for RS for one specific workload, 25 is that of AG. 43/39 is the same RS/AG pair for other ranks of
   // that workload. 32/28 is another such pair.
+  // 20->16, 17->25, 19->27, 31->23: 8B SimpleFSDP HSDP (dp2-fsdp4) at 1/2/4/8 ranks per node; on every rank
+  // the dp_replicate AllReduce stream and the dp_shard AG/RS stream are both scale-out, so they are merged.
+  // Scale-up (TP) streams are not merged: Workload::issue_comm replays them without genie_collective_ptr.
+  // 25->17 and 27->19 were not used: 25 is the target of 29->25, and 27 is the TP stream at 8 ranks per node.
   if (stream_ == 29) {
     return 25;
   }
@@ -176,6 +192,18 @@ int64_t ETFeederNode::stream() {
   }
   if (stream_ == 43) {
     return 39;
+  }
+  if (stream_ == 20) {
+    return 16;
+  }
+  if (stream_ == 17) {
+    return 25;
+  }
+  if (stream_ == 19) {
+    return 27;
+  }
+  if (stream_ == 31) {
+    return 23;
   }
   return stream_;
 }
@@ -192,6 +220,18 @@ DepQueue ETFeederNode::schedule_queue_id() {
   }
   if (schedule_queue_id_ == 43) {
     return 39;
+  }
+  if (schedule_queue_id_ == 20) {
+    return 16;
+  }
+  if (schedule_queue_id_ == 17) {
+    return 25;
+  }
+  if (schedule_queue_id_ == 19) {
+    return 27;
+  }
+  if (schedule_queue_id_ == 31) {
+    return 23;
   }
   return schedule_queue_id_;
 }
