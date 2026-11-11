@@ -43,6 +43,7 @@ class TraceLinker:
         output_file: str,
         strip_hierarchy: bool = False,
         sync_dependencies: bool = False,
+        sync_consumer_any_thread: bool = False,
     ) -> None:
         """
         Links Chakra host execution traces (ET) and Chakra device ET to generate Chakra host + device ET.
@@ -61,6 +62,9 @@ class TraceLinker:
                 have been captured with PyTorch's `enable_cuda_sync_events` experimental profiler flag; see
                 `load_sync_dependencies_from_cuda_events`. If the device trace lacks "cuda_sync" events, this is
                 a no-op (with a warning logged).
+            sync_consumer_any_thread (bool): With `sync_dependencies`, pick each wait's consumer as the first
+                launch onto the consumer stream from *any* host thread after the wait call, instead of only the
+                waiting thread. See `load_sync_dependencies_from_cuda_events`.
         """
         (
             kineto_cpu_ops,
@@ -81,7 +85,9 @@ class TraceLinker:
         ) = self.chakra_device_trace_loader.load(chakra_device_trace)
 
         if sync_dependencies:
-            num_deps = self.load_sync_dependencies_from_cuda_events(chakra_device_trace, kineto_gpu_ops)
+            num_deps = self.load_sync_dependencies_from_cuda_events(
+                chakra_device_trace, kineto_gpu_ops, any_thread=sync_consumer_any_thread
+            )
             if not num_deps:
                 logging.warning(
                     f"--sync-dependencies was requested, but no 'cuda_sync' events were found in "
@@ -457,7 +463,7 @@ class TraceLinker:
         return gpu_node
 
     def load_sync_dependencies_from_cuda_events(
-        self, chakra_device_trace: str, kineto_gpu_ops: List[KinetoOperator]
+        self, chakra_device_trace: str, kineto_gpu_ops: List[KinetoOperator], any_thread: bool = False
     ) -> int:
         """
         Populate cross-stream synchronization dependencies directly from Kineto's "cuda_sync"/"cuda_event"
@@ -491,6 +497,12 @@ class TraceLinker:
           interleaved in real time between those two moments (observed in ~80% of wait events on one workload),
           which could make the bisection land on an op that was not actually gated by this wait at all.
 
+        With `any_thread=True`, the consumer is instead the first launch onto the consumer stream issued by *any*
+        host thread after the `cudaStreamWaitEvent` call (CUDA semantics: a stream wait gates every later op
+        enqueued on that stream, whichever thread enqueues it). The same-thread assumption above breaks for
+        pipeline parallelism, where the schedule thread calls `work.wait()` on a P2P recv while the autograd
+        thread launches the backward kernels that consume it.
+
         This is far more direct than routing through Holistic Trace Analysis's critical path analysis (see
         `load_sync_dependencies`), which requires this same "cuda_sync" data anyway and is a much heavier,
         version-fragile dependency (its `critical_path_analysis` was found to crash on newer pandas versions in
@@ -502,6 +514,7 @@ class TraceLinker:
             chakra_device_trace (str): Path to the Kineto trace file.
             kineto_gpu_ops (List[KinetoOperator]): GPU-side Kineto operators already parsed from the same trace.
                 Mutated in place: matched consumer ops get their `sync_dep` list populated with producer ops.
+            any_thread (bool): Search for the consumer launch across all host threads (see above).
 
         Returns:
             int: The number of cross-stream synchronization dependencies found and recorded.
@@ -555,6 +568,9 @@ class TraceLinker:
                     launch_and_wait_events_by_tid.setdefault(event["tid"], []).append(event)
         for tid_events in launch_and_wait_events_by_tid.values():
             tid_events.sort(key=lambda e: e.get("ts", 0))
+        all_events = sorted(
+            (e for tid_events in launch_and_wait_events_by_tid.values() for e in tid_events), key=lambda e: e.get("ts", 0)
+        )
 
         # correlation ID of the CUDA runtime/driver launch call -> the GPU op it launched.
         gpu_op_by_corr: Dict[int, KinetoOperator] = {}
@@ -612,7 +628,7 @@ class TraceLinker:
             cpu_wait_op = cpu_wait_event_by_corr.get(wait_corr_id)
             if cpu_wait_op is None:
                 continue
-            tid_events = launch_and_wait_events_by_tid.get(cpu_wait_op["tid"])
+            tid_events = all_events if any_thread else launch_and_wait_events_by_tid.get(cpu_wait_op["tid"])
             if not tid_events:
                 continue
             wait_index = next((i for i, e in enumerate(tid_events) if e is cpu_wait_op), None)
@@ -630,7 +646,7 @@ class TraceLinker:
             if consumer_op is None:
                 logging.warning(
                     f"Stream Wait Event (external_id={wait_external_id}) expected consumer stream "
-                    f"{consumer_stream}, but no later kernel-launch call on the same host thread launched a GPU "
+                    f"{consumer_stream}, but no later kernel-launch call on the {'any' if any_thread else 'same'} host thread launched a GPU "
                     "op on that stream; skipping."
                 )
                 continue

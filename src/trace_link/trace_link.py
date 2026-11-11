@@ -64,6 +64,16 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--sync-consumer-any-thread",
+        action="store_true",
+        help=(
+            "With --sync-dependencies, take each wait's consumer as the first launch onto the consumer stream "
+            "from any host thread (not only the thread that issued cudaStreamWaitEvent). Needed when one thread "
+            "waits and another launches the gated kernels, e.g. pipeline-parallel P2P recv + autograd backward."
+        ),
+    )
+
     args = parser.parse_args()
 
     logging.basicConfig(level=args.log_level.upper())
@@ -76,6 +86,7 @@ def main() -> None:
         args.output_file,
         strip_hierarchy=args.strip_hierarchy,
         sync_dependencies=args.sync_dependencies,
+        sync_consumer_any_thread=args.sync_consumer_any_thread,
     )
 
     logging.info(f"Linking process successful. Output file is available at {args.output_file}.")
