@@ -122,6 +122,35 @@ TEST_F(ETFeederTest, NodeGetChildrenTest) {
   ASSERT_TRUE(children.find(435) != children.end());
 }
 
+TEST(DependancyResolverTest, ReplaysDataAndControlDependencies) {
+  Chakra::FeederV3::DependancyResolver resolver(true, true);
+  ChakraProtoMsg::Node first, second, third;
+  first.set_id(1);
+  second.set_id(2);
+  second.add_data_deps(1);
+  third.set_id(3);
+  third.add_ctrl_deps(2);
+  resolver.add_node(first);
+  resolver.add_node(second);
+  resolver.add_node(third);
+  resolver.resolve_dependancy_free_nodes();
+
+  for (int iteration = 0; iteration < 3; ++iteration) {
+    for (uint64_t id = 1; id <= 3; ++id) {
+      ASSERT_EQ(resolver.get_dependancy_free_nodes().size(), 1);
+      ASSERT_EQ(*resolver.get_dependancy_free_nodes().begin(), id);
+      resolver.take_node(id);
+      if (iteration == 0 && id == 1) {
+        EXPECT_THROW(resolver.reset_iteration(), std::runtime_error);
+      }
+      resolver.finish_node(id);
+    }
+    if (iteration < 2) {
+      resolver.reset_iteration();
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

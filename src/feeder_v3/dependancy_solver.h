@@ -40,6 +40,7 @@ class _DependancyLayer {
   void finish_node(const NodeId& node);
   void push_back_node(const NodeId& node);
   void resolve_dependancy_free_nodes();
+  void reset_iteration();
 
   const std::unordered_set<NodeId>& get_dependancy_free_nodes() const;
   const std::unordered_set<NodeId>& get_ongoing_nodes() const;
@@ -51,6 +52,9 @@ class _DependancyLayer {
   std::unordered_map<NodeId, std::unordered_set<NodeId>> parent_map_child;
   std::unordered_set<NodeId> dependancy_free_nodes;
   std::unordered_set<NodeId> ongoing_nodes;
+  std::unordered_map<NodeId, std::unordered_set<NodeId>> initial_child_map_parent;
+  std::unordered_map<NodeId, std::unordered_set<NodeId>> initial_parent_map_child;
+  std::unordered_set<NodeId> initial_dependancy_free_nodes;
   bool dirty = true;
   void _helper_allocate_bucket(NodeId node_id);
   std::shared_mutex mutex;
@@ -70,6 +74,7 @@ class DependancyResolver {
   void push_back_node(const NodeId& node);
   void finish_node(const NodeId& node);
   void resolve_dependancy_free_nodes();
+  void reset_iteration();
 
   const std::unordered_set<NodeId>& get_dependancy_free_nodes() const;
   const std::unordered_set<NodeId>& get_ongoing_nodes() const;

@@ -106,7 +106,21 @@ void _DependancyLayer::resolve_dependancy_free_nodes() {
   if (this->dependancy_free_nodes.empty())
     throw std::runtime_error(
         "No dependancy free nodes found, there might be deadlocks");
+  this->initial_child_map_parent = this->child_map_parent;
+  this->initial_parent_map_child = this->parent_map_child;
+  this->initial_dependancy_free_nodes = this->dependancy_free_nodes;
   this->dirty = false;
+}
+
+void _DependancyLayer::reset_iteration() {
+  std::unique_lock<std::shared_mutex> lock(this->mutex);
+  if (this->dirty || !this->child_map_parent.empty() ||
+      !this->ongoing_nodes.empty() || !this->dependancy_free_nodes.empty()) {
+    throw std::runtime_error("Cannot reset an unfinished dependency graph");
+  }
+  this->child_map_parent = this->initial_child_map_parent;
+  this->parent_map_child = this->initial_parent_map_child;
+  this->dependancy_free_nodes = this->initial_dependancy_free_nodes;
 }
 
 const std::unordered_set<NodeId>& _DependancyLayer::get_dependancy_free_nodes()
@@ -182,6 +196,12 @@ void DependancyResolver::resolve_dependancy_free_nodes() {
   this->data_dependancy.resolve_dependancy_free_nodes();
   this->ctrl_dependancy.resolve_dependancy_free_nodes();
   this->enabled_dependancy.resolve_dependancy_free_nodes();
+}
+
+void DependancyResolver::reset_iteration() {
+  this->data_dependancy.reset_iteration();
+  this->ctrl_dependancy.reset_iteration();
+  this->enabled_dependancy.reset_iteration();
 }
 
 const std::unordered_set<NodeId>& DependancyResolver::
